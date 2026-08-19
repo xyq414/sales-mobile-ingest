@@ -12,6 +12,20 @@ from sales_mobile_ingest.adapters import (
     adapter_profiles,
     classify_candidate,
 )
+from sales_mobile_ingest.android_calllog_probe import (
+    AMBIGUOUS,
+    EXACT,
+    HIGH_CONFIDENCE,
+    MAX_PROBE_ROWS,
+    NO_MATCH,
+    PACKAGE_NAME,
+    PROBE_SCHEMA_VERSION,
+    ProbeResultError,
+    correlation_for_recording,
+    mask_phone_number,
+    parse_probe_result,
+    safe_probe_summary,
+)
 from sales_mobile_ingest.config import ensure_layout, resolve_data_root
 from sales_mobile_ingest.contract import build_metadata, sha256_file, validate_recording
 from sales_mobile_ingest.events import (
@@ -79,6 +93,100 @@ def test_nullable_fields_and_stable_content_identity(tmp_path: Path) -> None:
     assert metadata["duration_seconds"] is None
     assert metadata["recorded_at_source"] == "filename_datetime"
     validate_recording(metadata)
+
+
+def _probe_payload(rows: list[dict] | None = None) -> dict:
+    return {
+        "schema_version": PROBE_SCHEMA_VERSION,
+        "package_name": PACKAGE_NAME,
+        "probe_timestamp": "2026-08-18T05:34:00Z",
+        "api_level": 36,
+        "manufacturer": "OPPO",
+        "model": "synthetic model",
+        "permission_status": "GRANTED",
+        "query_status": "PASS",
+        "query_exception_class": None,
+        "rows": rows if rows is not None else [],
+    }
+
+
+def _call_row(*, time_ms: int = 1_755_495_221_000, duration: int = 190, number: str = "13812345678", call_type: int = 2) -> dict:
+    return {
+        "date_epoch_ms": time_ms,
+        "duration_seconds": duration,
+        "number": number,
+        "type": call_type,
+        "cached_name": None,
+    }
+
+
+def test_android_probe_manifest_is_minimal_and_package_is_fixed() -> None:
+    root = Path(__file__).parents[1] / "android" / "calllog-probe"
+    manifest = (root / "app" / "src" / "main" / "AndroidManifest.xml").read_text(encoding="utf-8")
+    module = (root / "app" / "build.gradle").read_text(encoding="utf-8")
+    assert "android.permission.READ_CALL_LOG" in manifest
+    assert "android.permission.INTERNET" not in manifest
+    assert "WRITE_CALL_LOG" not in manifest
+    assert "READ_CONTACTS" not in manifest
+    assert f"applicationId '{PACKAGE_NAME}'" in module
+    assert "targetSdk 36" in module
+
+
+def test_android_probe_result_parser_requires_a_bounded_known_payload() -> None:
+    payload = _probe_payload([_call_row()])
+    assert parse_probe_result(payload)["rows"][0]["type"] == 2
+    with pytest.raises(ProbeResultError):
+        parse_probe_result(_probe_payload([_call_row() for _ in range(MAX_PROBE_ROWS + 1)]))
+    with pytest.raises(ProbeResultError):
+        parse_probe_result({"schema_version": "wrong", "package_name": PACKAGE_NAME, "rows": []})
+
+
+def test_phone_masking_and_safe_summary_do_not_expose_synthetic_number() -> None:
+    assert mask_phone_number("13812345678") == "138****5678"
+    assert mask_phone_number("12") == "***"
+    event = {
+        "occurred_at": "2025-08-18T13:33:41+08:00",
+        "occurred_at_source": "wpd_modified_at",
+        "duration_seconds": 190.028,
+    }
+    summary = safe_probe_summary(_probe_payload([_call_row()]), event)
+    rendered = json.dumps(summary, ensure_ascii=False)
+    assert "13812345678" not in rendered
+    assert "138****5678" in rendered
+    assert summary["rows"][0]["direction"] == "outgoing"
+
+
+def test_recording_calllog_correlation_is_conservative_about_time_provenance() -> None:
+    rows = [_call_row()]
+    wpd_result = correlation_for_recording(
+        occurred_at="2025-08-18T13:33:41+08:00",
+        occurred_at_source="wpd_modified_at",
+        recording_duration_seconds=190.028,
+        rows=rows,
+    )
+    assert wpd_result["status"] == HIGH_CONFIDENCE
+    assert wpd_result["candidate_count"] == 1
+    exact_result = correlation_for_recording(
+        occurred_at="2025-08-18T13:33:41+08:00",
+        occurred_at_source="recorded_at",
+        recording_duration_seconds=190.028,
+        rows=rows,
+    )
+    assert exact_result["status"] == EXACT
+    ambiguous = correlation_for_recording(
+        occurred_at="2025-08-18T13:33:41+08:00",
+        occurred_at_source="wpd_modified_at",
+        recording_duration_seconds=190.028,
+        rows=[_call_row(), _call_row(number="13999990000", call_type=1)],
+    )
+    assert ambiguous["status"] == AMBIGUOUS
+    no_match = correlation_for_recording(
+        occurred_at="2025-08-18T13:33:41+08:00",
+        occurred_at_source="wpd_modified_at",
+        recording_duration_seconds=190.028,
+        rows=[_call_row(duration=120)],
+    )
+    assert no_match["status"] == NO_MATCH
 
 
 def test_standard_filename_and_json_after_media(tmp_path: Path) -> None:

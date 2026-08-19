@@ -5,6 +5,7 @@ import json
 import time
 from pathlib import Path
 
+from .android_calllog_probe import summarize_private_result
 from .bridge import BridgeError
 from .config import ConfigError, resolve_data_root
 from .service import Ingestor
@@ -19,6 +20,13 @@ def build_parser() -> argparse.ArgumentParser:
     probe.add_argument("--data-root", dest="command_data_root", help=argparse.SUPPRESS)
     identity = subparsers.add_parser("investigate-identity", help="Read-only, privacy-preserving call identity investigation")
     identity.add_argument("--data-root", dest="command_data_root", help=argparse.SUPPRESS)
+    calllog_summary = subparsers.add_parser(
+        "calllog-probe-summary",
+        help="Create a safe local summary from an app-private Android CallLog probe result",
+    )
+    calllog_summary.add_argument("--raw-result", required=True, type=Path, help="Gitignored app-private result copied locally")
+    calllog_summary.add_argument("--event", required=True, type=Path, help="Existing local phone_call event JSON")
+    calllog_summary.add_argument("--safe-output", required=True, type=Path, help="Gitignored safe summary output path")
     ingest = subparsers.add_parser("ingest", help="Incrementally ingest call recordings")
     ingest.add_argument("--once", action="store_true", required=True, help="Run one bounded ingest pass")
     ingest.add_argument("--limit", type=int, help="Maximum source copy attempts for this one-shot pass")
@@ -54,6 +62,10 @@ def main(argv: list[str] | None = None) -> int:
                 "call_log_transport": result["call_log_transport"],
                 "event": result["event"],
             }, ensure_ascii=False, indent=2))
+            return 0
+        if args.command == "calllog-probe-summary":
+            summary = summarize_private_result(args.raw_result, args.event, args.safe_output)
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
             return 0
         interval = max(10, args.interval)
         while True:

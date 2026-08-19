@@ -39,6 +39,17 @@ htmlcov/
 build/
 dist/
 
+# Local Android toolchain, Gradle state, APKs, and Android private evidence
+android/.tooling/
+android/.gradle/
+android/**/.gradle/
+android/**/build/
+android/**/local.properties
+*.apk
+*.aab
+*.keystore
+*.jks
+
 # Editors and Windows noise
 .vscode/
 .idea/

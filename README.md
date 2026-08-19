@@ -86,3 +86,9 @@ diagnostics/probe-reports/ # gitignored 的脱敏本机诊断
 下游事件语义见 [contract/通信事件接口说明.md](contract/通信事件接口说明.md)。可选的 `salesperson_id` 只能写入本机 gitignored `config.local.json`；未配置时事件明确为 `UNCONFIGURED`，程序绝不从 Windows 或 Git 身份猜测。
 
 当前真实 OPPO 样本的电话身份能力边界见 [docs/通话身份解析能力.md](docs/通话身份解析能力.md)。它明确区分“录音自身没有号码证据”与“普通 MTP/WPD 不公开通话记录”，不会把任意长数字或文件修改时间伪装成客户身份。
+
+## Android CallLog feasibility probe（非生产功能）
+
+`android/calllog-probe` 是与 production MTP collector 隔离的最小 debug APK：只声明 `READ_CALL_LOG`，没有 `INTERNET`、录音、联系人、写入或后台权限。它只用于验证“正常 Android App 能否取得 CallLog 并与已导入录音关联”，不属于自动采集、不会修改 `ready/events`，也不会替换 Windows watcher。
+
+本机已验证源码与 APK build；`adb devices -l` 没有任何可安装设备，因此尚未对真机取得或拒绝 `READ_CALL_LOG` 下结论。详细的权限边界、真实状态和未来 probe 清理规则见 [docs/通话身份解析能力.md](docs/通话身份解析能力.md)。
