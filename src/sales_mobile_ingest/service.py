@@ -14,7 +14,23 @@ from .adapters import classify_candidate, device_identity
 from .bridge import MtpBridge
 from .config import ensure_layout, resolve_salesperson_id
 from .contract import build_metadata, iso_now, sha256_file, validate_recording
-from .events import build_communication_event, event_path, validate_event, write_event_atomically
+from .events import (
+    build_communication_event,
+    event_path,
+    replace_event_atomically,
+    validate_event,
+    write_event_atomically,
+)
+from .identity import (
+    audio_tag_phone_candidate_details,
+    classify_call_log_exposure,
+    filename_structure,
+    phone_candidate_details,
+    read_mp3_id3,
+    resolve_direct_phone,
+    safe_wpd_summary,
+    wpd_phone_candidate_details,
+)
 from .state import StateStore
 
 
@@ -158,6 +174,176 @@ class Ingestor:
         self._write_json_atomic(output, report)
         self._log("probe_report_saved", {"device_count": len(report["devices"]), "candidate_count": sum(row["candidate_count"] for row in report["devices"])})
         return output
+
+    def investigate_identity(self) -> dict[str, Any]:
+        """Perform a bounded, read-only identity probe for one ready recording."""
+        recordings = sorted(self.paths["ready"].glob("*.json"))
+        if len(recordings) != 1:
+            raise RuntimeError("Identity investigation currently requires exactly one ready recording")
+        recording_path = recordings[0]
+        recording = json.loads(recording_path.read_text(encoding="utf-8"))
+        validate_recording(recording)
+        media_path = self.paths["ready"] / str(recording["media_filename"])
+        if not media_path.is_file() or sha256_file(media_path) != recording["sha256"]:
+            raise RuntimeError("Ready recording media is absent or its sha256 differs")
+
+        current_source, probe_raw = self._find_current_source(recording)
+        wpd_inspection: dict[str, Any] | None = None
+        wpd_error: str | None = None
+        if current_source:
+            try:
+                wpd_inspection = self.bridge.inspect_source(current_source)
+            except Exception as exc:
+                wpd_error = str(exc)[:300]
+        else:
+            wpd_error = "ready_recording_source_not_currently_enumerated"
+
+        capabilities: dict[str, Any] | None = None
+        capability_error: str | None = None
+        try:
+            capabilities = self.bridge.inspect_capabilities()
+        except Exception as exc:
+            capability_error = str(exc)[:300]
+
+        audio_metadata = read_mp3_id3(media_path) if recording["original_extension"].casefold() == ".mp3" else {"format": "unsupported", "tags": {}}
+        direct = resolve_direct_phone({
+            "filename": phone_candidate_details(str(recording["original_filename"])),
+            "wpd_metadata": wpd_phone_candidate_details(wpd_inspection),
+            "audio_metadata": audio_tag_phone_candidate_details(audio_metadata),
+        })
+        call_log = classify_call_log_exposure(capabilities)
+        existing_event_path, existing_event = self._event_for_recording(recording)
+        enriched = False
+        if direct["status"] == "DIRECT_RECORDING_PHONE_ID_AVAILABLE":
+            enriched = self._apply_direct_phone_enrichment(
+                recording_path=recording_path,
+                recording=recording,
+                event_path_value=existing_event_path,
+                event=existing_event,
+                direct=direct,
+            )
+
+        raw_report = {
+            "report_schema_version": "identity-investigation-raw/v1",
+            "created_at": iso_now(),
+            "recording": recording,
+            "event_before": existing_event,
+            "current_source_enumerated": current_source,
+            "recording_probe": probe_raw,
+            "wpd_inspection": wpd_inspection,
+            "wpd_error": wpd_error,
+            "audio_metadata": audio_metadata,
+            "direct_resolution": direct,
+            "mtp_wpd_capabilities": capabilities,
+            "capability_error": capability_error,
+        }
+        reports_dir = self.data_root / "diagnostics" / "identity-investigation"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = iso_now().replace(":", "").replace("+", "_")
+        raw_path = reports_dir / f"identity-{timestamp}.raw.json"
+        summary_path = reports_dir / f"identity-{timestamp}.summary.json"
+        self._write_json_atomic(raw_path, raw_report)
+
+        current_event = json.loads(existing_event_path.read_text(encoding="utf-8")) if existing_event_path.is_file() else existing_event
+        summary = {
+            "report_schema_version": "identity-investigation-summary/v1",
+            "created_at": iso_now(),
+            "scope": "one_ready_recording_and_its_current_mtp_source",
+            "direct_recording_identity": {
+                "status": direct["status"],
+                "phone_number": direct.get("masked_phone"),
+                "phone_number_source": direct["phone_number_source"],
+                "phone_number_confidence": direct["phone_number_confidence"],
+                "evidence_level": direct["evidence_level"],
+                "source_candidate_counts": direct["source_candidate_counts"],
+                "filename_structure": filename_structure(str(recording["original_filename"])),
+                "audio_tag_names": sorted((audio_metadata.get("tags") or {}).keys()),
+                "audio_format": audio_metadata.get("format"),
+                "wpd": safe_wpd_summary(wpd_inspection),
+                "wpd_inspection_error": wpd_error,
+            },
+            "call_log_transport": {
+                **call_log,
+                "capability_probe_error": capability_error,
+                "automatic_no_extra_permission_source": "NOT_FOUND_IN_CURRENT_MTP_WPD_PROBE" if call_log["status"] != "CALL_LOG_EXPOSED_VIA_CURRENT_MTP_WPD" else "PRESENT",
+            },
+            "event": {
+                "phone_number_raw": "PRESENT" if current_event.get("phone_number_raw") else "NULL",
+                "phone_number_normalized": "PRESENT" if current_event.get("phone_number_normalized") else "NULL",
+                "phone_number_source": current_event.get("phone_number_source"),
+                "phone_number_confidence": current_event.get("phone_number_confidence"),
+                "contact_name": "PRESENT" if current_event.get("contact_name") else "NULL",
+                "contact_name_source": current_event.get("contact_name_source"),
+                "call_direction": current_event.get("call_direction"),
+                "call_direction_source": current_event.get("call_direction_source"),
+                "occurred_at_source": current_event.get("occurred_at_source"),
+                "duration_source": current_event.get("duration_source"),
+                "identity_enrichment_applied": enriched,
+            },
+        }
+        self._write_json_atomic(summary_path, summary)
+        self._log("identity_investigation", {
+            "direct_status": direct["status"],
+            "call_log_status": call_log["status"],
+            "identity_enrichment_applied": enriched,
+        })
+        return {"summary_path": summary_path, "raw_path": raw_path, **summary}
+
+    def _find_current_source(self, recording: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+        try:
+            raw = self.bridge.probe(self.state.known_dirs())
+        except Exception as exc:
+            return None, {"probe_error": str(exc)[:300]}
+        target_path = str(recording["source_relative_path"])
+        for device in raw.get("devices", []):
+            for candidate in device.get("candidates", []):
+                for item in candidate.get("files", []):
+                    if str(item.get("relative_path")) == target_path:
+                        return {
+                            **item,
+                            "device_key": device["device_key"],
+                            "device_name": device.get("display_name"),
+                            "relative_path": target_path,
+                        }, raw
+        return None, raw
+
+    def _event_for_recording(self, recording: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
+        for candidate_path in self.paths["events"].glob("*.json"):
+            candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
+            if candidate.get("recording_id") == recording.get("recording_id"):
+                validate_event(candidate)
+                return candidate_path, candidate
+        event = build_communication_event(
+            recording=recording, installation_id=self.state.installation_id(), salesperson_id=self.salesperson_id
+        )
+        return event_path(self.paths["events"], event), event
+
+    def _apply_direct_phone_enrichment(
+        self,
+        *,
+        recording_path: Path,
+        recording: dict[str, Any],
+        event_path_value: Path,
+        event: dict[str, Any],
+        direct: dict[str, Any],
+    ) -> bool:
+        updated_recording = {
+            **recording,
+            "phone_number": direct["phone_number_raw"],
+            "phone_number_source": direct["phone_number_source"],
+            "phone_number_confidence": direct["phone_number_confidence"],
+        }
+        validate_recording(updated_recording)
+        self._write_sidecar_atomically(recording_path, updated_recording)
+        updated_event = build_communication_event(
+            recording=updated_recording, installation_id=event["installation_id"], salesperson_id=self.salesperson_id
+        )
+        media_path = self.paths["ready"] / str(updated_recording["media_filename"])
+        if event_path_value.exists():
+            replace_event_atomically(event_path_value, updated_event, media_path, recording_path)
+        else:
+            write_event_atomically(event_path_value, updated_event, media_path, recording_path)
+        return True
 
     @staticmethod
     def _safe_filename_pattern(name: str, extension: str) -> dict[str, Any]:

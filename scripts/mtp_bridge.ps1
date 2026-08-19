@@ -215,6 +215,117 @@ function Get-CandidateRows([object]$Device, [object]$Payload) {
     return $rows
 }
 
+function Convert-PropertyValue([object]$Value) {
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [datetime]) { return $Value.ToUniversalTime().ToString('o') }
+    if ($Value -is [array]) { return @($Value | ForEach-Object { Convert-PropertyValue $_ }) }
+    return [string]$Value
+}
+
+function Get-ExtendedPropertyValue([object]$Item, [string]$PropertyName) {
+    try { return Convert-PropertyValue $Item.ExtendedProperty($PropertyName) } catch { return $null }
+}
+
+function Get-ShellColumns([object]$Item) {
+    $result = @()
+    try {
+        $folder = $Item.GetFolder
+        for ($index = 0; $index -lt 200; $index++) {
+            $label = [string]$folder.GetDetailsOf($null, $index)
+            if ([string]::IsNullOrWhiteSpace($label)) { continue }
+            $value = [string]$folder.GetDetailsOf($Item, $index)
+            if (-not [string]::IsNullOrWhiteSpace($value)) {
+                $result += [pscustomobject]@{ column_index = $index; label = $label; value = $value }
+            }
+        }
+    } catch {}
+    return $result
+}
+
+function Get-AdjacentObjects([object]$Device, [string]$RelativePath) {
+    $parts = @($RelativePath -split '/')
+    if ($parts.Count -lt 2) { return @() }
+    $parentPath = ($parts[0..($parts.Count - 2)] -join '/')
+    $parent = Resolve-RelativeItem $Device $parentPath
+    if ($null -eq $parent -or -not $parent.IsFolder) { return @() }
+    $result = @()
+    foreach ($child in @(Get-Children $parent) | Select-Object -First 100) {
+        $name = [string]$child.Name
+        $fileName = if ($child.IsFolder) { $null } else { Get-CanonicalFileName $child }
+        $result += [pscustomobject]@{
+            name = $name
+            canonical_file_name = $fileName
+            is_folder = [bool]$child.IsFolder
+            type = [string]$child.Type
+            extension = if ($child.IsFolder) { $null } else { Get-ItemExtension $child $fileName }
+            size_bytes = if ($child.IsFolder) { $null } else { Get-ItemSize $child }
+        }
+    }
+    return $result
+}
+
+function Invoke-Inspect([object]$Shell, [object]$Payload) {
+    $source = $Payload.source
+    $device = $null
+    foreach ($candidate in @(Get-PortableDevices $Shell)) {
+        if ($candidate.Path -eq $source.device_key -or $candidate.Name -eq $source.device_name) {
+            $device = $candidate
+            break
+        }
+    }
+    if ($null -eq $device) { return @{ ok = $false; error = 'portable_device_not_present' } }
+    $item = Resolve-RelativeItem $device ([string]$source.relative_path)
+    if ($null -eq $item -or $item.IsFolder) { return @{ ok = $false; error = 'source_item_not_found' } }
+    $propertyNames = @(
+        'System.FileName', 'System.FileExtension', 'System.ItemName', 'System.ItemNameDisplay',
+        'System.Title', 'System.Subject', 'System.Comment', 'System.Author', 'System.DateCreated',
+        'System.DateModified', 'System.Media.DateEncoded', 'System.Media.Duration', 'System.Size',
+        'System.Kind', 'System.MIMEType', 'System.Music.Artist', 'System.Music.AlbumTitle',
+        'System.Music.TrackNumber', 'System.Audio.EncodingBitrate', 'System.Audio.SampleRate'
+    )
+    $properties = [ordered]@{}
+    foreach ($propertyName in $propertyNames) {
+        $properties[$propertyName] = Get-ExtendedPropertyValue $item $propertyName
+    }
+    return @{
+        ok = $true
+        inspection_scope = 'single_source_and_direct_parent_directory'
+        source = @{
+            shell_name = [string]$item.Name
+            shell_type = [string]$item.Type
+            canonical_file_name = Get-CanonicalFileName $item
+            extension = Get-ItemExtension $item (Get-CanonicalFileName $item)
+            properties = $properties
+            shell_columns = @(Get-ShellColumns $item)
+        }
+        adjacent_objects = @(Get-AdjacentObjects $device ([string]$source.relative_path))
+    }
+}
+
+function Invoke-Capabilities([object]$Shell) {
+    $devices = @()
+    foreach ($device in @(Get-PortableDevices $Shell)) {
+        $storage = @()
+        foreach ($root in @(Get-Children $device) | Where-Object { $_.IsFolder } | Select-Object -First 10) {
+            $topLevel = @()
+            foreach ($child in @(Get-Children $root) | Select-Object -First 100) {
+                $topLevel += [pscustomobject]@{
+                    name = [string]$child.Name
+                    type = [string]$child.Type
+                    is_folder = [bool]$child.IsFolder
+                }
+            }
+            $storage += [pscustomobject]@{ name = [string]$root.Name; direct_children = $topLevel }
+        }
+        $devices += [pscustomobject]@{
+            display_name = [string]$device.Name
+            device_shell_type = [string]$device.Type
+            storage = $storage
+        }
+    }
+    return @{ ok = $true; inspection_scope = 'portable_device_roots_and_first_level_storage_objects'; devices = $devices }
+}
+
 function Invoke-Probe([object]$Shell, [object]$Payload) {
     $devices = @()
     foreach ($device in @(Get-PortableDevices $Shell)) {
@@ -281,6 +392,14 @@ try {
     }
     if ($payload.operation -eq 'copy') {
         Emit-Json (Invoke-Copy $shell $payload)
+        exit 0
+    }
+    if ($payload.operation -eq 'inspect') {
+        Emit-Json (Invoke-Inspect $shell $payload)
+        exit 0
+    }
+    if ($payload.operation -eq 'capabilities') {
+        Emit-Json (Invoke-Capabilities $shell)
         exit 0
     }
     throw "unsupported_operation:$($payload.operation)"

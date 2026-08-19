@@ -17,6 +17,8 @@ def build_parser() -> argparse.ArgumentParser:
     probe = subparsers.add_parser("probe", help="Read-only portable-device and candidate-directory discovery")
     probe.add_argument("--save-report", action="store_true", help="Save a privacy-minimal local diagnostic report")
     probe.add_argument("--data-root", dest="command_data_root", help=argparse.SUPPRESS)
+    identity = subparsers.add_parser("investigate-identity", help="Read-only, privacy-preserving call identity investigation")
+    identity.add_argument("--data-root", dest="command_data_root", help=argparse.SUPPRESS)
     ingest = subparsers.add_parser("ingest", help="Incrementally ingest call recordings")
     ingest.add_argument("--once", action="store_true", required=True, help="Run one bounded ingest pass")
     ingest.add_argument("--limit", type=int, help="Maximum source copy attempts for this one-shot pass")
@@ -42,6 +44,16 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "ingest":
             summary = ingestor.ingest_once(limit=args.limit).as_dict()
             print(json.dumps({"data_root": str(data_root), **summary}, ensure_ascii=False))
+            return 0
+        if args.command == "investigate-identity":
+            result = ingestor.investigate_identity()
+            print(json.dumps({
+                "data_root": str(data_root),
+                "saved_summary": str(result["summary_path"]),
+                "direct_recording_identity": result["direct_recording_identity"],
+                "call_log_transport": result["call_log_transport"],
+                "event": result["event"],
+            }, ensure_ascii=False, indent=2))
             return 0
         interval = max(10, args.interval)
         while True:

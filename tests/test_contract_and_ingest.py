@@ -18,8 +18,21 @@ from sales_mobile_ingest.events import (
     EventValidationError,
     build_communication_event,
     normalise_phone_number,
+    replace_event_atomically,
     validate_event,
     write_event_atomically,
+)
+from sales_mobile_ingest.identity import (
+    CALL_LOG_EXPOSED,
+    CALL_LOG_NOT_EXPOSED,
+    DIRECT_RECORDING_PHONE_ID_CONFLICT,
+    DIRECT_RECORDING_PHONE_ID_NOT_FOUND,
+    audio_tag_phone_candidate_details,
+    classify_call_log_exposure,
+    filename_structure,
+    phone_candidate_details,
+    resolve_direct_phone,
+    safe_wpd_summary,
 )
 from sales_mobile_ingest.service import Ingestor
 
@@ -277,3 +290,68 @@ def test_legacy_recording_without_additive_duration_source_still_valid(tmp_path:
     metadata = build_metadata(source=source_for(staged), sha256=sha256_file(staged), media_filename=staged.name)
     metadata.pop("duration_source")
     validate_recording(metadata)
+
+
+def test_filename_phone_candidates_are_conservative_and_keep_raw_display_value() -> None:
+    candidates = phone_candidate_details("call-138 0013 8000-20250115.mp3")
+    assert candidates == [{"raw": "138 0013 8000", "normalized": "13800138000"}]
+    assert phone_candidate_details("recording-20250115-190.mp3") == []
+    assert filename_structure("call-138 0013 8000-20250115.mp3")["datetime_token_start"] is None
+
+
+def test_direct_identity_is_unresolved_without_evidence_and_conflict_is_not_silently_chosen() -> None:
+    none = resolve_direct_phone({"filename": [], "wpd_metadata": [], "audio_metadata": []})
+    assert none["status"] == DIRECT_RECORDING_PHONE_ID_NOT_FOUND
+    conflict = resolve_direct_phone({
+        "filename": [{"raw": "13800138000", "normalized": "13800138000"}],
+        "wpd_metadata": [{"raw": "13900139000", "normalized": "13900139000"}],
+    })
+    assert conflict["status"] == DIRECT_RECORDING_PHONE_ID_CONFLICT
+    assert conflict["phone_number_normalized"] is None
+
+
+def test_audio_tag_identity_probe_is_read_only_and_uses_synthetic_tags() -> None:
+    metadata = {"format": "id3v2.3", "tags": {"TIT2": ["customer 138 0013 8000"], "TPE1": ["synthetic"]}}
+    candidates = audio_tag_phone_candidate_details(metadata)
+    assert candidates == [{"raw": "138 0013 8000", "normalized": "13800138000"}]
+
+
+def test_wpd_summary_redacts_values_and_call_log_capability_is_explicit() -> None:
+    raw = {
+        "source": {"properties": {"System.Title": "private-name", "System.Size": "9"}, "shell_columns": [{"label": "Name", "value": "private-name"}]},
+        "adjacent_objects": [{"is_folder": False, "extension": ".mp3"}],
+    }
+    summary = safe_wpd_summary(raw)
+    assert "private-name" not in json.dumps(summary)
+    blocked = classify_call_log_exposure({"devices": [{"storage": [{"direct_children": [{"name": "Music"}]}]}]})
+    exposed = classify_call_log_exposure({"devices": [{"storage": [{"direct_children": [{"name": "Call History"}]}]}]})
+    assert blocked["status"] == CALL_LOG_NOT_EXPOSED
+    assert blocked["backup_or_export_object_exposed"] is False
+    assert exposed["status"] == CALL_LOG_EXPOSED
+
+
+def test_controlled_event_enrichment_keeps_event_id_and_media_identity(tmp_path: Path) -> None:
+    ingestor = Ingestor(tmp_path / "data")
+    staged = stage_file(ingestor.paths["stage"], "20250115_101530_call.m4a")
+    assert ingestor.ingest_staged_for_test(staged, source_for(staged)) == "imported"
+    recording_path = next(ingestor.paths["ready"].glob("*.json"))
+    recording = json.loads(recording_path.read_text(encoding="utf-8"))
+    event_path = next(ingestor.paths["events"].glob("*.json"))
+    original_event = json.loads(event_path.read_text(encoding="utf-8"))
+    updated_recording = {
+        **recording,
+        "phone_number": "138 0013 8000",
+        "phone_number_source": "filename",
+        "phone_number_confidence": "low",
+    }
+    validate_recording(updated_recording)
+    ingestor._write_sidecar_atomically(recording_path, updated_recording)
+    updated_event = build_communication_event(
+        recording=updated_recording, installation_id=original_event["installation_id"], salesperson_id=None
+    )
+    replace_event_atomically(event_path, updated_event, ingestor.paths["ready"] / recording["media_filename"], recording_path)
+    rewritten = json.loads(event_path.read_text(encoding="utf-8"))
+    assert rewritten["event_id"] == original_event["event_id"]
+    assert rewritten["media_sha256"] == original_event["media_sha256"]
+    assert rewritten["phone_number_normalized"] == "13800138000"
+    assert rewritten["phone_number_source"] == "filename"

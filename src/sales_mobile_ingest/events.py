@@ -67,7 +67,12 @@ def build_communication_event(
     adapter = str(recording.get("ingest_adapter") or "generic-call-recording-v1")
     profile = profile_for_adapter(adapter)
     raw_phone = recording.get("phone_number") if isinstance(recording.get("phone_number"), str) else None
-    phone_source = "unknown"
+    phone_source = recording.get("phone_number_source") if recording.get("phone_number_source") in {
+        "filename", "wpd_metadata", "audio_metadata", "manual"
+    } else "unknown"
+    phone_confidence = recording.get("phone_number_confidence") if recording.get("phone_number_confidence") in {
+        "high", "medium", "low"
+    } else "unknown"
     return {
         "schema_version": "communication-event/v1",
         "event_id": event_id,
@@ -84,11 +89,15 @@ def build_communication_event(
         "phone_number_raw": raw_phone,
         "phone_number_normalized": normalise_phone_number(raw_phone),
         "phone_number_source": phone_source,
-        "phone_number_confidence": "unknown",
+        "phone_number_confidence": phone_confidence,
         "contact_name": recording.get("contact_name"),
-        "contact_name_source": "unknown",
+        "contact_name_source": recording.get("contact_name_source") if recording.get("contact_name_source") in {
+            "filename", "wpd_metadata", "audio_metadata", "manual"
+        } else "unknown",
         "call_direction": recording.get("call_direction") or "unknown",
-        "call_direction_source": "unknown",
+        "call_direction_source": recording.get("call_direction_source") if recording.get("call_direction_source") in {
+            "filename", "wpd_metadata", "manual"
+        } else "unknown",
         "duration_seconds": recording.get("duration_seconds"),
         "duration_source": recording.get("duration_source") or "unknown",
         "media_ref": f"ready/recordings/{recording['media_filename']}",
@@ -126,6 +135,30 @@ def write_event_atomically(path: Path, event: dict[str, Any], media_path: Path, 
             raise EventValidationError("Recording pair disappeared before event commit")
         os.replace(temporary_name, path)
         return True
+    finally:
+        if os.path.exists(temporary_name):
+            os.unlink(temporary_name)
+
+
+def replace_event_atomically(path: Path, event: dict[str, Any], media_path: Path, recording_path: Path) -> None:
+    """Atomically replace one existing event after controlled identity enrichment."""
+    validate_event(event)
+    if not path.is_file() or not media_path.is_file() or not recording_path.is_file():
+        raise EventValidationError("Refusing event enrichment without a complete ready recording pair")
+    existing = json.loads(path.read_text(encoding="utf-8"))
+    validate_event(existing)
+    if existing["event_id"] != event["event_id"]:
+        raise EventValidationError("Refusing enrichment that changes event_id")
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".event-enrichment-", suffix=".json", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(event, handle, ensure_ascii=False, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        if not media_path.is_file() or not recording_path.is_file():
+            raise EventValidationError("Recording pair disappeared before event enrichment commit")
+        os.replace(temporary_name, path)
     finally:
         if os.path.exists(temporary_name):
             os.unlink(temporary_name)

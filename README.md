@@ -40,6 +40,9 @@ python -m venv .venv
 # 同时生成本机 gitignored 的脱敏诊断报告（不含文件名、号码、联系人或序列号）
 .\.venv\Scripts\python.exe -m sales_mobile_ingest probe --save-report
 
+# 对唯一 ready 录音执行只读的号码/通话记录能力调查；原始敏感证据只保存在本机 diagnostics
+.\.venv\Scripts\python.exe -m sales_mobile_ingest investigate-identity
+
 # 一次增量采集
 .\.venv\Scripts\python.exe -m sales_mobile_ingest ingest --once --data-root "F:\CompanyData\SalesMobile"
 
@@ -81,3 +84,5 @@ diagnostics/probe-reports/ # gitignored 的脱敏本机诊断
 参见 [docs/当前状态.md](docs/当前状态.md) 与 [docs/厂商适配矩阵.md](docs/厂商适配矩阵.md)。前者严格区分合成测试和本机真机验证；后者将 `REAL_DEVICE_VERIFIED`、`OFFICIAL_DOC_CANDIDATE`、`DOC_EVIDENCE_UNAVAILABLE` 与 generic heuristic 明确分开。
 
 下游事件语义见 [contract/通信事件接口说明.md](contract/通信事件接口说明.md)。可选的 `salesperson_id` 只能写入本机 gitignored `config.local.json`；未配置时事件明确为 `UNCONFIGURED`，程序绝不从 Windows 或 Git 身份猜测。
+
+当前真实 OPPO 样本的电话身份能力边界见 [docs/通话身份解析能力.md](docs/通话身份解析能力.md)。它明确区分“录音自身没有号码证据”与“普通 MTP/WPD 不公开通话记录”，不会把任意长数字或文件修改时间伪装成客户身份。

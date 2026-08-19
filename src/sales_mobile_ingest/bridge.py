@@ -45,6 +45,20 @@ class MtpBridge:
             raise BridgeError("MTP bridge returned a destination outside staging") from exc
         return destination
 
+    def inspect_source(self, source: dict[str, Any]) -> dict[str, Any]:
+        """Read bounded WPD/Shell properties for one known source object only."""
+        response = self._run({"operation": "inspect", "source": source})
+        if not response.get("ok"):
+            raise BridgeError(response.get("error", "MTP source inspection failed"))
+        return response
+
+    def inspect_capabilities(self) -> dict[str, Any]:
+        """Inspect only portable-device roots and first-level storage folders."""
+        response = self._run({"operation": "capabilities"})
+        if not response.get("ok"):
+            raise BridgeError(response.get("error", "MTP capability inspection failed"))
+        return response
+
     def _run(self, payload: dict[str, Any], timeout: int = 45) -> dict[str, Any]:
         if not self.script_path.exists():
             raise BridgeError(f"MTP bridge script is missing: {self.script_path}")
