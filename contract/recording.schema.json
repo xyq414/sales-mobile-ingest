@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sales-mobile-ingest.local/contract/recording.schema.json",
+  "title": "Sales Mobile Ingest Recording Contract v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "recording_id", "source_type", "device_vendor", "device_model",
+    "source_relative_path", "original_filename", "original_extension", "source_size_bytes",
+    "source_modified_at", "recorded_at", "recorded_at_source", "phone_number", "contact_name",
+    "call_direction", "duration_seconds", "sha256", "media_filename", "imported_at",
+    "ingest_adapter", "ingest_status"
+  ],
+  "properties": {
+    "schema_version": {"const": "recording-contract/v1"},
+    "recording_id": {"type": "string", "pattern": "^rec_[a-f0-9]{64}$"},
+    "source_type": {"const": "phone_call_recording"},
+    "device_vendor": {"type": ["string", "null"]},
+    "device_model": {"type": ["string", "null"]},
+    "source_relative_path": {"type": "string", "minLength": 1},
+    "original_filename": {"type": "string", "minLength": 1},
+    "original_extension": {"type": "string", "pattern": "^\\.[A-Za-z0-9]{1,10}$"},
+    "source_size_bytes": {"type": "integer", "minimum": 0},
+    "source_modified_at": {"type": ["string", "null"], "format": "date-time"},
+    "recorded_at": {"type": "string", "format": "date-time"},
+    "recorded_at_source": {"enum": ["filename_datetime", "source_modified_at", "imported_at"]},
+    "phone_number": {"type": ["string", "null"]},
+    "contact_name": {"type": ["string", "null"]},
+    "call_direction": {"enum": ["incoming", "outgoing", "unknown", null]},
+    "duration_seconds": {"type": ["number", "integer", "null"], "minimum": 0},
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "media_filename": {"type": "string", "pattern": "^[^\\\\/]+\\.[A-Za-z0-9]{1,10}$"},
+    "imported_at": {"type": "string", "format": "date-time"},
+    "ingest_adapter": {"type": "string", "minLength": 1},
+    "ingest_status": {"const": "ready"}
+  }
+}

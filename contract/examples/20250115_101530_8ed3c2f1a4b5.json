@@ -1,0 +1,23 @@
+{
+  "schema_version": "recording-contract/v1",
+  "recording_id": "rec_8ed3c2f1a4b5c6d7e8f90123456789abcdef0123456789abcdef0123456789ab",
+  "source_type": "phone_call_recording",
+  "device_vendor": "OPPO",
+  "device_model": "OPPO Example Model",
+  "source_relative_path": "Internal shared storage/Recordings/20250115_101530_example.m4a",
+  "original_filename": "20250115_101530_example.m4a",
+  "original_extension": ".m4a",
+  "source_size_bytes": 123456,
+  "source_modified_at": "2025-01-15T02:15:30+00:00",
+  "recorded_at": "2025-01-15T10:15:30+08:00",
+  "recorded_at_source": "filename_datetime",
+  "phone_number": null,
+  "contact_name": null,
+  "call_direction": "unknown",
+  "duration_seconds": null,
+  "sha256": "8ed3c2f1a4b5c6d7e8f90123456789abcdef0123456789abcdef0123456789ab",
+  "media_filename": "20250115_101530_8ed3c2f1a4b5.m4a",
+  "imported_at": "2025-01-15T02:20:00+00:00",
+  "ingest_adapter": "oppo-v1",
+  "ingest_status": "ready"
+}
