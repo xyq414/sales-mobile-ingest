@@ -40,6 +40,9 @@ python -m venv .venv
 # 一次增量采集
 .\.venv\Scripts\python.exe -m sales_mobile_ingest ingest --once --data-root "F:\CompanyData\SalesMobile"
 
+# 第一次真机冒烟：最多复制一个候选源文件
+.\.venv\Scripts\python.exe -m sales_mobile_ingest ingest --once --limit 1
+
 # 前台观察模式（自动任务实际调用的命令）
 .\.venv\Scripts\python.exe -m sales_mobile_ingest watch --interval 45
 
@@ -49,6 +52,10 @@ python -m venv .venv
 ```
 
 `probe` 只扫描限定深度内的候选目录名，然后只在候选目录中查看有限数量的音频项目。`Recordings` 之类的名称不是成功依据：OPPO v1 还要求音频和命名/时间特征；通用适配器还要求明确的 call/phone/通话特征，因此不会把普通 Music 目录当作通话录音。
+
+部分 Android/WPD 实现会把 Shell `Name` 作为不带扩展名的显示名。bridge 会优先读取 `System.FileName` 与 `System.FileExtension`，因此不会因该显示差异漏掉真实 `.mp3`、`.m4a` 等录音；路径解析仍使用 Shell 的原始相对节点名。
+
+`ingest --once` 默认处理所有符合条件且尚未导入的源文件；`--limit N` 只限制该次命令的源文件复制尝试，适合首次真机 smoke test，不会改变长期的正常增量策略。
 
 自动启动优先注册用户登录时的 `SalesMobileIngest` Task Scheduler 任务；若公司 Windows 策略拒绝普通用户注册任务，安装脚本会改用当前用户 Startup 目录中的可卸载隐藏 `pythonw` 启动项，并明确输出该结果。两种方式都不依赖 Codex 持续运行。
 

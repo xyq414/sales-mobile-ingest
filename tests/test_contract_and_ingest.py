@@ -116,8 +116,51 @@ def test_oppo_candidate_needs_name_plus_content_but_generic_needs_call_evidence(
 def test_generic_adapter_rejects_music_like_path() -> None:
     decision = classify_candidate(
         device_name="Pixel",
-        relative_path="Internal/Music/Call Recordings",
+        relative_path="Internal/Music/Recordings",
         files=[{"name": "20250115_101530.m4a", "extension": ".m4a"}],
     )
     assert not decision.accepted
     assert "music_like_path_rejected" in decision.evidence
+
+
+def test_oppo_wpd_file_can_use_system_file_extension_when_shell_name_has_no_dot() -> None:
+    decision = classify_candidate(
+        device_name="OPPO A6 Pro 5G",
+        relative_path="Internal shared storage/Music/Recordings/Call Recordings",
+        files=[{"name": "opaque-shell-name.mp3", "extension": ".mp3"}],
+    )
+    assert decision.accepted
+    assert decision.adapter == "oppo-v1"
+
+
+def test_one_shot_limit_prevents_first_connection_from_copying_every_candidate(tmp_path: Path) -> None:
+    fixture = stage_file(tmp_path, "20250115_101530_fixture.mp3", b"first")
+
+    class FakeBridge:
+        def probe(self, cached_dirs: list[dict[str, str]], search_depth: int = 3) -> dict:
+            return {
+                "devices": [{
+                    "device_key": "fake-oppo",
+                    "display_name": "OPPO fixture",
+                    "storage_roots": ["Internal"],
+                    "search_depth": search_depth,
+                    "candidates": [{
+                        "relative_path": "Internal/Music/Recordings/Call Recordings",
+                        "files": [
+                            {"name": "20250115_101530_fixture.mp3", "extension": ".mp3", "relative_path": "Internal/Music/Recordings/Call Recordings/a", "size_bytes": 5, "modified_at": None},
+                            {"name": "20250115_101531_fixture.mp3", "extension": ".mp3", "relative_path": "Internal/Music/Recordings/Call Recordings/b", "size_bytes": 6, "modified_at": None},
+                        ],
+                    }],
+                }]
+            }
+
+        def copy_to_staging(self, source: dict, destination_dir: Path) -> Path:
+            target = destination_dir / source["name"]
+            target.write_bytes(fixture.read_bytes() if source["name"].endswith("1530_fixture.mp3") else b"second")
+            return target
+
+    ingestor = Ingestor(tmp_path / "data", bridge=FakeBridge())
+    summary = ingestor.ingest_once(limit=1)
+    assert summary.new_imports == 1
+    assert summary.source_attempts == 1
+    assert len(list(ingestor.paths["ready"].glob("*.json"))) == 1

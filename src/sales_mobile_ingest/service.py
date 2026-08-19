@@ -24,6 +24,7 @@ class IngestSummary:
     new_imports: int = 0
     duplicates: int = 0
     failures: int = 0
+    source_attempts: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -33,6 +34,7 @@ class IngestSummary:
             "new_imports": self.new_imports,
             "duplicates": self.duplicates,
             "failures": self.failures,
+            "source_attempts": self.source_attempts,
         }
 
 
@@ -80,8 +82,11 @@ class Ingestor:
             })
         return {"devices": result, "bridge_observation": raw.get("observation", "ok")}
 
-    def ingest_once(self) -> IngestSummary:
+    def ingest_once(self, limit: int | None = None) -> IngestSummary:
+        if limit is not None and limit < 1:
+            raise ValueError("limit must be at least 1")
         summary = IngestSummary()
+        stop_requested = False
         raw = self.bridge.probe(self.state.known_dirs())
         devices = raw.get("devices", [])
         summary.devices = len(devices)
@@ -89,6 +94,8 @@ class Ingestor:
             vendor, model = device_identity(device.get("display_name"))
             accepted_any = False
             for candidate in device.get("candidates", []):
+                if stop_requested:
+                    break
                 summary.candidates_scanned += 1
                 decision = classify_candidate(
                     device_name=device.get("display_name"),
@@ -101,6 +108,9 @@ class Ingestor:
                 summary.candidates_accepted += 1
                 candidate_succeeded = False
                 for item in candidate.get("files", []):
+                    if limit is not None and summary.source_attempts >= limit:
+                        stop_requested = True
+                        break
                     source = {
                         **item,
                         "device_key": device["device_key"],
@@ -109,6 +119,7 @@ class Ingestor:
                         "device_model": model,
                         "adapter": decision.adapter,
                     }
+                    summary.source_attempts += 1
                     outcome = self._ingest_source(source)
                     if outcome == "imported":
                         summary.new_imports += 1
@@ -122,7 +133,7 @@ class Ingestor:
                     self.state.remember_directory(
                         str(device["device_key"]), str(device.get("display_name", "")), candidate["relative_path"]
                     )
-            if not accepted_any and device.get("search_depth", 3) < 5:
+            if not stop_requested and not accepted_any and device.get("search_depth", 3) < 5:
                 # A directory-name-only expansion remains bounded and only happens after insufficient evidence.
                 expanded = self.bridge.probe(self.state.known_dirs(), search_depth=5)
                 expanded_device = next((row for row in expanded.get("devices", []) if row.get("device_key") == device.get("device_key")), None)
@@ -139,7 +150,11 @@ class Ingestor:
                         summary.candidates_accepted += 1
                         candidate_succeeded = False
                         for item in candidate.get("files", []):
+                            if limit is not None and summary.source_attempts >= limit:
+                                stop_requested = True
+                                break
                             source = {**item, "device_key": device["device_key"], "device_name": device.get("display_name"), "device_vendor": vendor, "device_model": model, "adapter": decision.adapter}
+                            summary.source_attempts += 1
                             outcome = self._ingest_source(source)
                             if outcome == "imported":
                                 summary.new_imports += 1
@@ -153,6 +168,8 @@ class Ingestor:
                             self.state.remember_directory(
                                 str(device["device_key"]), str(device.get("display_name", "")), candidate["relative_path"]
                             )
+            if stop_requested:
+                break
         self.state.save()
         self._log("ingest", summary.as_dict())
         return summary

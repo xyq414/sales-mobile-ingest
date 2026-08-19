@@ -91,7 +91,7 @@ def build_metadata(
         "phone_number": None,
         "contact_name": None,
         "call_direction": "unknown",
-        "duration_seconds": None,
+        "duration_seconds": source.get("duration_seconds"),
         "sha256": sha256,
         "media_filename": media_filename,
         "imported_at": imported_at,

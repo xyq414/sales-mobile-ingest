@@ -18,6 +18,7 @@ def build_parser() -> argparse.ArgumentParser:
     probe.add_argument("--data-root", dest="command_data_root", help=argparse.SUPPRESS)
     ingest = subparsers.add_parser("ingest", help="Incrementally ingest call recordings")
     ingest.add_argument("--once", action="store_true", required=True, help="Run one bounded ingest pass")
+    ingest.add_argument("--limit", type=int, help="Maximum source copy attempts for this one-shot pass")
     ingest.add_argument("--data-root", dest="command_data_root", help=argparse.SUPPRESS)
     watch = subparsers.add_parser("watch", help="Poll for phones and run incremental ingestion")
     watch.add_argument("--interval", type=int, default=45, help="Seconds between passes (minimum: 10)")
@@ -35,7 +36,7 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"data_root": str(data_root), **result}, ensure_ascii=False, indent=2))
             return 0
         if args.command == "ingest":
-            summary = ingestor.ingest_once().as_dict()
+            summary = ingestor.ingest_once(limit=args.limit).as_dict()
             print(json.dumps({"data_root": str(data_root), **summary}, ensure_ascii=False))
             return 0
         interval = max(10, args.interval)
@@ -46,7 +47,7 @@ def main(argv: list[str] | None = None) -> int:
             except BridgeError as exc:
                 ingestor._log("bridge_error", {"message": str(exc)[:300]})
             time.sleep(interval)
-    except (ConfigError, BridgeError, RuntimeError) as exc:
+    except (ConfigError, BridgeError, RuntimeError, ValueError) as exc:
         print(json.dumps({"error": str(exc)}, ensure_ascii=False))
         return 2
 

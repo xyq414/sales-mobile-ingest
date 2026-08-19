@@ -6,6 +6,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding = [Console]::OutputEncoding
 
 function Emit-Json([object]$Value) {
     [Console]::Out.Write(($Value | ConvertTo-Json -Compress -Depth 12))
@@ -73,14 +74,56 @@ function Get-ItemSize([object]$Item) {
     return 0
 }
 
+function Get-CanonicalFileName([object]$Item) {
+    try {
+        $fileName = [string]$Item.ExtendedProperty('System.FileName')
+        if (-not [string]::IsNullOrWhiteSpace($fileName)) { return $fileName }
+    } catch {}
+    $name = [string]$Item.Name
+    try {
+        $extension = [string]$Item.ExtendedProperty('System.FileExtension')
+        if (-not [string]::IsNullOrWhiteSpace($extension) -and -not $name.EndsWith($extension, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return "$name$extension"
+        }
+    } catch {}
+    return $name
+}
+
+function Get-ItemExtension([object]$Item, [string]$FileName) {
+    try {
+        $extension = [string]$Item.ExtendedProperty('System.FileExtension')
+        if (-not [string]::IsNullOrWhiteSpace($extension)) { return $extension.ToLowerInvariant() }
+    } catch {}
+    return [System.IO.Path]::GetExtension($FileName).ToLowerInvariant()
+}
+
 function Get-ItemModifiedAt([object]$Item) {
+    try {
+        $raw = $Item.ExtendedProperty('System.DateModified')
+        if ($raw -is [datetime]) { return $raw.ToUniversalTime().ToString('o') }
+        if ($null -ne $raw -and -not [string]::IsNullOrWhiteSpace([string]$raw)) {
+            return ([datetime]::Parse([string]$raw, [System.Globalization.CultureInfo]::CurrentCulture)).ToUniversalTime().ToString('o')
+        }
+    } catch {
+    }
     try {
         $raw = [string]$Item.ModifyDate
         if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
-        return ([datetime]::Parse($raw, [System.Globalization.CultureInfo]::CurrentCulture)).ToUniversalTime().ToString('o')
-    } catch {
-        return $null
-    }
+        $parsed = [datetime]::Parse($raw, [System.Globalization.CultureInfo]::CurrentCulture)
+        if ($parsed.Year -lt 2000) { return $null }
+        return $parsed.ToUniversalTime().ToString('o')
+    } catch {}
+    return $null
+}
+
+function Get-DurationSeconds([object]$Item) {
+    try {
+        $raw = $Item.ExtendedProperty('System.Media.Duration')
+        if ($null -ne $raw -and [Int64]$raw -gt 0) {
+            return [math]::Round(([double][Int64]$raw / 10000000.0), 3)
+        }
+    } catch {}
+    return $null
 }
 
 function Get-AudioFiles([object]$FolderItem, [string]$RelativePath, [int]$Depth = 0) {
@@ -94,14 +137,16 @@ function Get-AudioFiles([object]$FolderItem, [string]$RelativePath, [int]$Depth 
             }
             continue
         }
-        $extension = [System.IO.Path]::GetExtension([string]$child.Name).ToLowerInvariant()
+        $fileName = Get-CanonicalFileName $child
+        $extension = Get-ItemExtension $child $fileName
         if ($supported -contains $extension) {
             $result += [pscustomobject]@{
-                name = [string]$child.Name
+                name = $fileName
                 extension = $extension
                 relative_path = $childRelative
                 size_bytes = Get-ItemSize $child
                 modified_at = Get-ItemModifiedAt $child
+                duration_seconds = Get-DurationSeconds $child
             }
         }
         if ($result.Count -ge 250) { break }
@@ -205,14 +250,15 @@ function Invoke-Copy([object]$Shell, [object]$Payload) {
     $destinationFolder = $Shell.Namespace($destination)
     if ($null -eq $destinationFolder) { return @{ ok = $false; error = 'destination_namespace_unavailable' } }
     $destinationFolder.CopyHere($item, 1044)
-    $target = Join-Path $destination ([string]$item.Name)
     $expected = [Int64]($source.size_bytes)
     $deadline = [datetime]::UtcNow.AddSeconds([int]$Payload.timeout_seconds)
     $stable = 0
     $lastLength = -1
     while ([datetime]::UtcNow -lt $deadline) {
-        if (Test-Path -LiteralPath $target -PathType Leaf) {
-            $length = (Get-Item -LiteralPath $target).Length
+        $copied = @(Get-ChildItem -LiteralPath $destination -File -ErrorAction SilentlyContinue)
+        if ($copied.Count -eq 1) {
+            $target = $copied[0].FullName
+            $length = $copied[0].Length
             if (($expected -gt 0 -and $length -eq $expected) -or ($expected -eq 0 -and $length -eq $lastLength -and $length -gt 0)) {
                 $stable += 1
                 if ($stable -ge 2) { return @{ ok = $true; destination_path = $target } }

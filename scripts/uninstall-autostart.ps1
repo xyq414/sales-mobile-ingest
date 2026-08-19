@@ -4,6 +4,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$projectRoot = Split-Path -Parent $PSScriptRoot
 $removed = $false
 & schtasks.exe /Query /TN $TaskName *> $null
 if ($LASTEXITCODE -eq 0) {
@@ -16,4 +17,11 @@ if (Test-Path -LiteralPath $fallbackPath -PathType Leaf) {
     Remove-Item -LiteralPath $fallbackPath -Force
     $removed = $true
 }
-if ($removed) { Write-Output "Removed $TaskName auto-start registration" } else { Write-Output "$TaskName had no installed auto-start registration" }
+$workers = Get-CimInstance Win32_Process -Filter "Name = 'python.exe' OR Name = 'pythonw.exe'" | Where-Object {
+    $_.CommandLine -like "*$projectRoot*sales_mobile_ingest*watch*"
+}
+foreach ($worker in $workers) {
+    Stop-Process -Id $worker.ProcessId -Force
+    $removed = $true
+}
+if ($removed) { Write-Output "Removed $TaskName auto-start registration and matching watcher processes" } else { Write-Output "$TaskName had no installed auto-start registration" }

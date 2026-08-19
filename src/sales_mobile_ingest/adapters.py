@@ -65,10 +65,12 @@ def classify_candidate(
     if filename_signals:
         score += 2
         evidence.append(f"call_or_datetime_filename:{filename_signals}")
-    if _NEGATIVE_PATH_RE.search(relative_path):
+    if _NEGATIVE_PATH_RE.search(relative_path) and not explicit_call_directory:
         score -= 8
         evidence.append("music_like_path_rejected")
         return CandidateDecision(False, None, score, evidence)
+    if _NEGATIVE_PATH_RE.search(relative_path) and explicit_call_directory:
+        evidence.append("explicit_call_directory_overrides_music_parent")
 
     vendor, _ = device_identity(device_name)
     if explicit_call_directory:
