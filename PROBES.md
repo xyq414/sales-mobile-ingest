@@ -12,6 +12,14 @@ Probe sequence:
 
 If a phone is unavailable, code and synthetic tests remain valid, but physical-device E2E remains explicitly unverified.
 
+# Public CallLog XML export probe (current priority)
+
+The next identity source is an explicitly user-created CallLog-only XML backup from SyncTech `SMS Backup & Restore`, accessed only as an ordinary public file through the same Windows Shell/MTP boundary. It is not an ADB source and it is not a replacement for the recording collector.
+
+The intended probe is bounded: detect the currently connected portable device, inspect only the selected public backup directory, list only expected call-log XML candidates, and copy a selected XML only into gitignored `data_root/diagnostics/calllog-backup` for local schema inspection. Normal output may contain only root/field names and types; raw XML, phone numbers, contact names and full values are local diagnostic evidence only.
+
+Observed on 2026-08-19 after the user reported creating a CallLog-only backup: the first MTP probe and three 5-second retries each returned `devices=0`. Therefore the terminal probe status is `WINDOWS_MTP_DEVICE_NOT_CURRENTLY_AVAILABLE`. No directory/file was enumerated, no XML was copied or parsed, and no parser/correlation/event enrichment was implemented from an assumed schema. This is not evidence about whether the phone-side backup exists or contains calls.
+
 # Android CallLog feasibility probe
 
 `android/calllog-probe` is deliberately separate from the production MTP collector. It is a local-only debug APK with one declared permission, `READ_CALL_LOG`, no `INTERNET`, and an app-private JSON result. The Windows helper builds it, checks ADB state, and only attempts install when exactly one already-authorized ADB device is listed.
