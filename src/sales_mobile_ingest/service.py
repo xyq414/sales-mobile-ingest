@@ -12,11 +12,24 @@ from typing import Any, Callable
 
 from .adapters import classify_candidate, device_identity
 from .bridge import MtpBridge
+from .calllog_export import (
+    AMBIGUOUS,
+    EXACT,
+    HIGH_CONFIDENCE,
+    NO_MATCH,
+    CallLogExportError,
+    CallLogExportProvider,
+    correlate_recording_to_calllog,
+    inspect_xml_schema,
+    registered_calllog_export_providers,
+    safe_rows_summary,
+)
 from .config import ensure_layout, resolve_salesperson_id
 from .contract import build_metadata, iso_now, sha256_file, validate_recording
 from .events import (
     build_communication_event,
     event_path,
+    normalise_phone_number,
     replace_event_atomically,
     validate_event,
     write_event_atomically,
@@ -46,6 +59,11 @@ class IngestSummary:
     events_created: int = 0
     events_existing: int = 0
     event_failures: int = 0
+    calllog_xml_candidates: int = 0
+    calllog_new_artifacts: int = 0
+    calllog_canonical_rows_new: int = 0
+    calllog_events_enriched: int = 0
+    calllog_failures: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -59,6 +77,53 @@ class IngestSummary:
             "events_created": self.events_created,
             "events_existing": self.events_existing,
             "event_failures": self.event_failures,
+            "calllog_xml_candidates": self.calllog_xml_candidates,
+            "calllog_new_artifacts": self.calllog_new_artifacts,
+            "calllog_canonical_rows_new": self.calllog_canonical_rows_new,
+            "calllog_events_enriched": self.calllog_events_enriched,
+            "calllog_failures": self.calllog_failures,
+        }
+
+
+@dataclass
+class CallLogExportSummary:
+    devices: int = 0
+    directories_scanned: int = 0
+    xml_candidates: int = 0
+    new_artifacts: int = 0
+    duplicate_artifacts: int = 0
+    schema_valid: int = 0
+    schema_failures: int = 0
+    copy_failures: int = 0
+    parsed_rows: int = 0
+    canonical_rows_new: int = 0
+    canonical_rows_duplicate: int = 0
+    correlations_exact: int = 0
+    correlations_high_confidence: int = 0
+    correlations_ambiguous: int = 0
+    correlations_no_match: int = 0
+    events_enriched: int = 0
+    events_already_enriched: int = 0
+
+    def as_dict(self) -> dict[str, int]:
+        return {
+            "devices": self.devices,
+            "directories_scanned": self.directories_scanned,
+            "xml_candidates": self.xml_candidates,
+            "new_artifacts": self.new_artifacts,
+            "duplicate_artifacts": self.duplicate_artifacts,
+            "schema_valid": self.schema_valid,
+            "schema_failures": self.schema_failures,
+            "copy_failures": self.copy_failures,
+            "parsed_rows": self.parsed_rows,
+            "canonical_rows_new": self.canonical_rows_new,
+            "canonical_rows_duplicate": self.canonical_rows_duplicate,
+            "correlations_exact": self.correlations_exact,
+            "correlations_high_confidence": self.correlations_high_confidence,
+            "correlations_ambiguous": self.correlations_ambiguous,
+            "correlations_no_match": self.correlations_no_match,
+            "events_enriched": self.events_enriched,
+            "events_already_enriched": self.events_already_enriched,
         }
 
 
@@ -174,6 +239,243 @@ class Ingestor:
         self._write_json_atomic(output, report)
         self._log("probe_report_saved", {"device_count": len(report["devices"]), "candidate_count": sum(row["candidate_count"] for row in report["devices"])})
         return output
+
+    def inspect_calllog_exports(self) -> CallLogExportSummary:
+        """Copy only bounded public exporter XML files into ignored diagnostics and inspect their shape."""
+        sources, devices, directory_count = self._discover_calllog_export_sources()
+        summary = CallLogExportSummary(devices=devices, directories_scanned=directory_count, xml_candidates=len(sources))
+        for _, source in sources:
+            try:
+                outcome, _, _, _ = self._stage_calllog_export(source)
+                if outcome == "new":
+                    summary.new_artifacts += 1
+                else:
+                    summary.duplicate_artifacts += 1
+                summary.schema_valid += 1
+            except CallLogExportError:
+                summary.schema_failures += 1
+            except Exception:
+                summary.copy_failures += 1
+        self.state.save()
+        self._log("calllog_export_inspection", summary.as_dict())
+        return summary
+
+    def ingest_calllog_exports(self) -> CallLogExportSummary:
+        """Persist canonical rows from registered export providers, then enrich only unique matches."""
+        sources, devices, directory_count = self._discover_calllog_export_sources()
+        summary = CallLogExportSummary(devices=devices, directories_scanned=directory_count, xml_candidates=len(sources))
+        for provider, source in sources:
+            try:
+                outcome, artifact_sha256, artifact_path, _ = self._stage_calllog_export(source)
+                if outcome == "new":
+                    summary.new_artifacts += 1
+                else:
+                    summary.duplicate_artifacts += 1
+                rows = provider.parse(artifact_path, artifact_sha256)
+                summary.schema_valid += 1
+                summary.parsed_rows += len(rows)
+                for row in rows:
+                    persisted = {**row, "device_key": source["device_key"]}
+                    if self.state.remember_calllog_row(persisted):
+                        summary.canonical_rows_new += 1
+                    else:
+                        summary.canonical_rows_duplicate += 1
+                self._write_calllog_parse_summary(artifact_sha256, provider.provider_id, rows)
+            except CallLogExportError:
+                summary.schema_failures += 1
+            except Exception:
+                summary.copy_failures += 1
+        correlation = self._reconcile_calllog_events()
+        summary.correlations_exact += correlation[EXACT]
+        summary.correlations_high_confidence += correlation[HIGH_CONFIDENCE]
+        summary.correlations_ambiguous += correlation[AMBIGUOUS]
+        summary.correlations_no_match += correlation[NO_MATCH]
+        summary.events_enriched += correlation["events_enriched"]
+        summary.events_already_enriched += correlation["events_already_enriched"]
+        self.state.save()
+        self._log("calllog_export_ingest", summary.as_dict())
+        return summary
+
+    def _discover_calllog_export_sources(self) -> tuple[list[tuple[CallLogExportProvider, dict[str, Any]]], int, int]:
+        sources: list[tuple[CallLogExportProvider, dict[str, Any]]] = []
+        device_keys: set[str] = set()
+        directories = 0
+        for provider in registered_calllog_export_providers():
+            raw = self.bridge.discover_calllog_exports(
+                directory_names=list(provider.directory_names),
+                file_name_prefixes=list(provider.filename_prefixes),
+                search_depth=1,
+            )
+            for device in raw.get("devices", []):
+                device_key = str(device.get("device_key") or "")
+                if device_key:
+                    device_keys.add(device_key)
+                for directory in device.get("directories", []):
+                    directories += 1
+                    for item in directory.get("files", []):
+                        sources.append((provider, {
+                            **item,
+                            "device_key": device_key,
+                            "device_name": str(device.get("display_name") or ""),
+                            "calllog_provider": provider.provider_id,
+                        }))
+        return sources, len(device_keys), directories
+
+    def _stage_calllog_export(self, source: dict[str, Any]) -> tuple[str, str, Path, dict[str, Any]]:
+        source_key = self._calllog_source_key(source)
+        expected_size = int(source.get("size_bytes") or 0)
+        known_sha = self.state.calllog_source_sha256(source_key, expected_size, source.get("modified_at"))
+        if known_sha:
+            existing = self.paths["calllog_diagnostics"] / f"{known_sha}.xml"
+            if existing.is_file():
+                return "duplicate", known_sha, existing, self._write_calllog_schema_summary(existing, known_sha)
+
+        stage_directory = self.paths["calllog_stage"] / uuid.uuid4().hex
+        stage_directory.mkdir(parents=True, exist_ok=True)
+        try:
+            staged = self.bridge.copy_to_staging(source, stage_directory)
+            actual_size = staged.stat().st_size
+            if expected_size and actual_size != expected_size:
+                self._move_calllog_stage_to_failed(staged, source, f"size_mismatch expected={expected_size} actual={actual_size}")
+                raise RuntimeError("call-log export size mismatch")
+            sha256 = sha256_file(staged)
+            destination = self.paths["calllog_diagnostics"] / f"{sha256}.xml"
+            if destination.exists():
+                staged.unlink(missing_ok=True)
+                outcome = "duplicate"
+            else:
+                os.replace(staged, destination)
+                outcome = "new"
+            self.state.remember_calllog_source(source_key, actual_size, source.get("modified_at"), sha256)
+            self.state.remember_calllog_artifact(sha256, actual_size)
+            return outcome, sha256, destination, self._write_calllog_schema_summary(destination, sha256)
+        except Exception as exc:
+            for partial in stage_directory.glob("*"):
+                if partial.is_file():
+                    self._move_calllog_stage_to_failed(partial, source, str(exc))
+            raise
+        finally:
+            shutil.rmtree(stage_directory, ignore_errors=True)
+
+    def _write_calllog_schema_summary(self, artifact_path: Path, sha256: str) -> dict[str, Any]:
+        summary = inspect_xml_schema(artifact_path)
+        safe_summary = {
+            "artifact_sha256": sha256,
+            "artifact_size_bytes": artifact_path.stat().st_size,
+            **summary,
+        }
+        self._write_json_atomic(self.paths["calllog_diagnostics"] / f"{sha256}.schema.json", safe_summary)
+        return safe_summary
+
+    def _write_calllog_parse_summary(self, artifact_sha256: str, provider_id: str, rows: list[dict[str, Any]]) -> None:
+        self._write_json_atomic(self.paths["calllog_diagnostics"] / f"{artifact_sha256}.parse-summary.json", {
+            "parse_summary_version": "synctech-calllog-export-safe-summary/v1",
+            "artifact_sha256": artifact_sha256,
+            "provider_id": provider_id,
+            **safe_rows_summary(rows),
+        })
+
+    def _move_calllog_stage_to_failed(self, path: Path, source: dict[str, Any], reason: str) -> None:
+        token = uuid.uuid4().hex[:12]
+        target = self.paths["calllog_failed"] / f"{token}{path.suffix}.part"
+        if path.exists():
+            shutil.move(str(path), target)
+        self._write_json_atomic(target.with_suffix(".failure.json"), {
+            "failed_at": iso_now(),
+            "reason": reason[:300],
+            "expected_size_bytes": source.get("size_bytes"),
+        })
+
+    def _reconcile_calllog_events(self) -> dict[str, int]:
+        result = {EXACT: 0, HIGH_CONFIDENCE: 0, AMBIGUOUS: 0, NO_MATCH: 0, "events_enriched": 0, "events_already_enriched": 0}
+        safe_observations: list[dict[str, Any]] = []
+        current_source_devices = self._current_recording_source_devices()
+        for event_path_value in self.paths["events"].glob("*.json"):
+            event = json.loads(event_path_value.read_text(encoding="utf-8"))
+            validate_event(event)
+            recording_path = next((
+                path for path in self.paths["ready"].glob("*.json")
+                if json.loads(path.read_text(encoding="utf-8")).get("recording_id") == event.get("recording_id")
+            ), None)
+            if recording_path is None:
+                continue
+            recording = json.loads(recording_path.read_text(encoding="utf-8"))
+            validate_recording(recording)
+            device_key = self._recording_device_key(recording, current_source_devices)
+            if not device_key:
+                continue
+            correlation = correlate_recording_to_calllog(
+                occurred_at=event.get("occurred_at"),
+                occurred_at_source=event.get("occurred_at_source"),
+                recording_duration_seconds=event.get("duration_seconds"),
+                rows=self.state.calllog_rows_for_device(device_key),
+            )
+            result[correlation.status] += 1
+            safe_observations.append({"event_id": event["event_id"], **correlation.safe_summary()})
+            row = correlation.matched_row
+            if correlation.status not in {EXACT, HIGH_CONFIDENCE} or row is None:
+                continue
+            canonical_call_id = str(row["canonical_call_id"])
+            if self.state.calllog_enrichment_matches(event["event_id"], canonical_call_id):
+                result["events_already_enriched"] += 1
+                continue
+            updated_event = self._enriched_event(event, row)
+            if updated_event != event:
+                media_path = self.paths["ready"] / str(recording["media_filename"])
+                replace_event_atomically(event_path_value, updated_event, media_path, recording_path)
+                result["events_enriched"] += 1
+            self.state.remember_calllog_enrichment(event["event_id"], canonical_call_id)
+        if safe_observations:
+            self._write_json_atomic(self.paths["calllog_diagnostics"] / "latest-correlation-summary.json", {
+                "summary_version": "calllog-recording-correlation-summary/v1",
+                "observations": safe_observations,
+            })
+        return result
+
+    @staticmethod
+    def _enriched_event(event: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
+        updated = dict(event)
+        phone = row.get("phone_number_raw")
+        if isinstance(phone, str) and phone:
+            updated["phone_number_raw"] = phone
+            updated["phone_number_normalized"] = normalise_phone_number(phone)
+            updated["phone_number_source"] = "calllog_export"
+            updated["phone_number_confidence"] = "medium"
+        contact_name = row.get("contact_name")
+        if isinstance(contact_name, str) and contact_name:
+            updated["contact_name"] = contact_name
+            updated["contact_name_source"] = "calllog_export"
+        direction = row.get("call_direction")
+        if direction in {"incoming", "outgoing"}:
+            updated["call_direction"] = direction
+            updated["call_direction_source"] = "calllog_export"
+        validate_event(updated)
+        return updated
+
+    def _current_recording_source_devices(self) -> dict[str, str]:
+        """Read current recording candidates once to bind transient MTP device keys safely."""
+        try:
+            raw = self.bridge.probe(self.state.known_dirs())
+        except Exception:
+            return {}
+        return {
+            str(item.get("relative_path")): str(device.get("device_key"))
+            for device in raw.get("devices", [])
+            for candidate in device.get("candidates", [])
+            for item in candidate.get("files", [])
+            if item.get("relative_path") and device.get("device_key")
+        }
+
+    def _recording_device_key(self, recording: dict[str, Any], current_source_devices: dict[str, str]) -> str | None:
+        current_key = current_source_devices.get(str(recording.get("source_relative_path") or ""))
+        if current_key:
+            return current_key
+        matching_keys = [
+            key.split("|", 1)[0]
+            for key, source in self.state.data["sources"].items()
+            if source.get("sha256") == recording.get("sha256") and "|" in key
+        ]
+        return matching_keys[0] if len(set(matching_keys)) == 1 else None
 
     def investigate_identity(self) -> dict[str, Any]:
         """Perform a bounded, read-only identity probe for one ready recording."""
@@ -453,6 +755,16 @@ class Ingestor:
         summary.events_created += event_summary["created"]
         summary.events_existing += event_summary["existing"]
         summary.event_failures += event_summary["failures"]
+        try:
+            calllog_summary = self.ingest_calllog_exports()
+            summary.calllog_xml_candidates += calllog_summary.xml_candidates
+            summary.calllog_new_artifacts += calllog_summary.new_artifacts
+            summary.calllog_canonical_rows_new += calllog_summary.canonical_rows_new
+            summary.calllog_events_enriched += calllog_summary.events_enriched
+        except Exception as exc:
+            # Call-log export is optional enrichment. It must not block a sound recording import.
+            summary.calllog_failures += 1
+            self._log("calllog_export_failure", {"reason": str(exc)[:300]})
         self.state.save()
         self._log("ingest", summary.as_dict())
         return summary
@@ -603,6 +915,9 @@ class Ingestor:
 
     def _source_key(self, source: dict[str, Any]) -> str:
         return f"{source.get('device_key', '')}|{source['relative_path']}"
+
+    def _calllog_source_key(self, source: dict[str, Any]) -> str:
+        return f"{source.get('calllog_provider', '')}|{self._source_key(source)}"
 
     def _write_sidecar_atomically(self, path: Path, metadata: dict[str, Any]) -> None:
         descriptor, temporary_name = tempfile.mkstemp(prefix=".metadata-", suffix=".json", dir=path.parent)

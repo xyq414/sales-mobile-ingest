@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -27,6 +29,18 @@ from sales_mobile_ingest.android_calllog_probe import (
     safe_probe_summary,
 )
 from sales_mobile_ingest.config import ensure_layout, resolve_data_root
+from sales_mobile_ingest.calllog_export import (
+    AMBIGUOUS as EXPORT_AMBIGUOUS,
+    EXACT as EXPORT_EXACT,
+    HIGH_CONFIDENCE as EXPORT_HIGH_CONFIDENCE,
+    NO_MATCH as EXPORT_NO_MATCH,
+    CallLogExportError,
+    correlate_recording_to_calllog,
+    inspect_xml_schema,
+    parse_synctech_calllog_export,
+    registered_calllog_export_providers,
+    safe_rows_summary,
+)
 from sales_mobile_ingest.contract import build_metadata, sha256_file, validate_recording
 from sales_mobile_ingest.events import (
     EventValidationError,
@@ -189,6 +203,176 @@ def test_recording_calllog_correlation_is_conservative_about_time_provenance() -
     assert no_match["status"] == NO_MATCH
 
 
+def _synctech_xml(rows: list[dict[str, str]]) -> str:
+    elements = "".join(
+        "<call " + " ".join(f'{key}="{value}"' for key, value in row.items()) + " />"
+        for row in rows
+    )
+    return f'<?xml version="1.0" encoding="UTF-8"?><calls count="{len(rows)}">{elements}</calls>'
+
+
+def test_synctech_xml_schema_and_parser_keep_values_out_of_safe_summary(tmp_path: Path) -> None:
+    xml_path = tmp_path / "calls-synthetic.xml"
+    xml_path.write_text(_synctech_xml([{
+        "date": "1736907330000", "duration": "190", "type": "2", "number": "13812345678", "contact_name": "Synthetic Contact",
+    }]), encoding="utf-8")
+    schema = inspect_xml_schema(xml_path)
+    assert schema["root_element"] == "calls"
+    assert schema["element_count"] == 2
+    assert schema["element_tag_counts"] == {"call": 1, "calls": 1}
+    assert schema["element_attribute_types"]["call"]["date"] == ["integer"]
+    rows = parse_synctech_calllog_export(xml_path, artifact_sha256="a" * 64)
+    assert rows[0]["call_direction"] == "outgoing"
+    assert rows[0]["canonical_call_id"].startswith("clg_")
+    rendered = json.dumps(safe_rows_summary(rows), ensure_ascii=False)
+    assert "13812345678" not in rendered
+    assert "Synthetic Contact" not in rendered
+
+
+def test_calllog_export_provider_registry_separates_discovery_from_business_flow() -> None:
+    providers = registered_calllog_export_providers()
+    assert len(providers) == 1
+    assert providers[0].provider_id == "synctech-sms-backup-restore/v1"
+    assert providers[0].directory_names == ("SMSBackupRestore",)
+    assert providers[0].filename_prefixes == ("calls-",)
+
+
+def test_synctech_parser_rejects_malformed_rows_and_accepts_no_calls(tmp_path: Path) -> None:
+    malformed = tmp_path / "calls-malformed.xml"
+    malformed.write_text('<calls><call date="1736907330000" type="2" /></calls>', encoding="utf-8")
+    with pytest.raises(CallLogExportError):
+        parse_synctech_calllog_export(malformed, artifact_sha256="b" * 64)
+    empty = tmp_path / "calls-empty.xml"
+    empty.write_text('<calls count="0" />', encoding="utf-8")
+    assert parse_synctech_calllog_export(empty, artifact_sha256="c" * 64) == []
+
+
+def test_synctech_correlation_is_unique_and_conservative(tmp_path: Path) -> None:
+    xml_path = tmp_path / "calls-multiple.xml"
+    xml_path.write_text(_synctech_xml([
+        {"date": "1736907330000", "duration": "190", "type": "2", "number": "13812345678"},
+        {"date": "1736907331000", "duration": "190", "type": "1", "number": "13999990000"},
+    ]), encoding="utf-8")
+    rows = parse_synctech_calllog_export(xml_path, artifact_sha256="d" * 64)
+    high = correlate_recording_to_calllog(
+        occurred_at="2025-01-15T02:15:30+00:00", occurred_at_source="wpd_modified_at", recording_duration_seconds=190, rows=[rows[0]],
+    )
+    assert high.status == EXPORT_HIGH_CONFIDENCE
+    exact = correlate_recording_to_calllog(
+        occurred_at="2025-01-15T02:15:30+00:00", occurred_at_source="filename", recording_duration_seconds=190, rows=[rows[0]],
+    )
+    assert exact.status == EXPORT_EXACT
+    ambiguous = correlate_recording_to_calllog(
+        occurred_at="2025-01-15T02:15:30+00:00", occurred_at_source="wpd_modified_at", recording_duration_seconds=190, rows=rows,
+    )
+    assert ambiguous.status == EXPORT_AMBIGUOUS
+    no_match = correlate_recording_to_calllog(
+        occurred_at="2025-01-15T02:15:30+00:00", occurred_at_source="wpd_modified_at", recording_duration_seconds=120, rows=rows,
+    )
+    assert no_match.status == EXPORT_NO_MATCH
+
+
+def test_wpd_modified_time_can_only_use_explicit_local_offset_end_alignment(tmp_path: Path) -> None:
+    event_time = datetime.fromisoformat("2025-01-15T02:05:20+00:00").timestamp()
+    row_time_ms = int((event_time + 28_800 - 190) * 1000)
+    xml_path = tmp_path / "calls-timezone.xml"
+    xml_path.write_text(_synctech_xml([{
+        "date": str(row_time_ms), "duration": "190", "type": "2", "number": "13812345678",
+    }]), encoding="utf-8")
+    row = parse_synctech_calllog_export(xml_path, artifact_sha256="e" * 64)[0]
+    result = correlate_recording_to_calllog(
+        occurred_at="2025-01-15T02:05:20+00:00",
+        occurred_at_source="wpd_modified_at",
+        recording_duration_seconds=190,
+        rows=[row],
+        local_utc_offset_seconds=28_800,
+    )
+    assert result.status == EXPORT_HIGH_CONFIDENCE
+    assert result.time_alignment == "wpd_modified_at_local_offset_minus_recording_duration"
+    assert result.time_delta_seconds == 0
+
+
+def test_calllog_export_ingest_enriches_once_and_skips_duplicate_snapshot(tmp_path: Path) -> None:
+    xml_path = tmp_path / "calls-synthetic.xml"
+    xml_path.write_text(_synctech_xml([{
+        "date": "1736907330000", "duration": "190", "type": "2", "number": "13812345678", "contact_name": "Synthetic Contact",
+    }]), encoding="utf-8")
+
+    class FakeBridge:
+        def discover_calllog_exports(self, **_: object) -> dict:
+            return {
+                "devices": [{
+                    "device_key": "synthetic-oppo",
+                    "display_name": "OPPO A6 Pro (synthetic)",
+                    "directories": [{
+                        "relative_path": "Internal shared storage/SMSBackupRestore",
+                        "files": [{
+                            "name": "calls-synthetic.xml",
+                            "extension": ".xml",
+                            "relative_path": "Internal shared storage/SMSBackupRestore/calls-synthetic.xml",
+                            "size_bytes": xml_path.stat().st_size,
+                            "modified_at": "2025-01-15T02:15:30+00:00",
+                        }],
+                    }],
+                }],
+            }
+
+        def copy_to_staging(self, _source: dict, destination_dir: Path) -> Path:
+            target = destination_dir / "calls-synthetic.xml"
+            shutil.copyfile(xml_path, target)
+            return target
+
+    ingestor = Ingestor(tmp_path / "data", bridge=FakeBridge())
+    staged = stage_file(ingestor.paths["stage"], "20250115_101530_call.m4a")
+    recording_source = source_for(staged)
+    recording_source["duration_seconds"] = 190
+    assert ingestor.ingest_staged_for_test(staged, recording_source) == "imported"
+    first = ingestor.ingest_calllog_exports()
+    assert first.new_artifacts == first.canonical_rows_new == first.events_enriched == 1
+    event_path = next(ingestor.paths["events"].glob("*.json"))
+    event = json.loads(event_path.read_text(encoding="utf-8"))
+    assert event["phone_number_raw"] == "13812345678"
+    assert event["phone_number_source"] == "calllog_export"
+    assert event["call_direction"] == "outgoing"
+    second = ingestor.ingest_calllog_exports()
+    assert second.duplicate_artifacts == second.canonical_rows_duplicate == second.events_already_enriched == 1
+    assert len(list(ingestor.paths["events"].glob("*.json"))) == 1
+
+
+def test_calllog_row_persists_for_a_late_arriving_recording(tmp_path: Path) -> None:
+    xml_path = tmp_path / "calls-late.xml"
+    xml_path.write_text(_synctech_xml([{
+        "date": "1736907330000", "duration": "190", "type": "1", "number": "13812345678",
+    }]), encoding="utf-8")
+
+    class FakeBridge:
+        def discover_calllog_exports(self, **_: object) -> dict:
+            return {"devices": [{
+                "device_key": "synthetic-oppo",
+                "display_name": "OPPO A6 Pro (synthetic)",
+                "directories": [{"relative_path": "Internal/SMSBackupRestore", "files": [{
+                    "name": "calls-late.xml", "extension": ".xml", "relative_path": "Internal/SMSBackupRestore/calls-late.xml",
+                    "size_bytes": xml_path.stat().st_size, "modified_at": "2025-01-15T02:15:30+00:00",
+                }]}],
+            }]}
+
+        def copy_to_staging(self, _source: dict, destination_dir: Path) -> Path:
+            target = destination_dir / "calls-late.xml"
+            shutil.copyfile(xml_path, target)
+            return target
+
+    ingestor = Ingestor(tmp_path / "data", bridge=FakeBridge())
+    assert ingestor.ingest_calllog_exports().canonical_rows_new == 1
+    assert not list(ingestor.paths["events"].glob("*.json"))
+    staged = stage_file(ingestor.paths["stage"], "20250115_101530_call.m4a")
+    source = source_for(staged)
+    source["duration_seconds"] = 190
+    assert ingestor.ingest_staged_for_test(staged, source) == "imported"
+    late = ingestor.ingest_calllog_exports()
+    assert late.canonical_rows_duplicate == 1
+    assert late.events_enriched == 1
+
+
 def test_standard_filename_and_json_after_media(tmp_path: Path) -> None:
     root = tmp_path / "different-volume-name" / "sales-data"
     ingestor = Ingestor(root)
@@ -298,10 +482,14 @@ def test_one_shot_limit_prevents_first_connection_from_copying_every_candidate(t
             target.write_bytes(fixture.read_bytes() if source["name"].endswith("1530_fixture.mp3") else b"second")
             return target
 
+        def discover_calllog_exports(self, **_: object) -> dict:
+            return {"devices": []}
+
     ingestor = Ingestor(tmp_path / "data", bridge=FakeBridge())
     summary = ingestor.ingest_once(limit=1)
     assert summary.new_imports == 1
     assert summary.source_attempts == 1
+    assert summary.calllog_failures == 0
     assert len(list(ingestor.paths["ready"].glob("*.json"))) == 1
 
 

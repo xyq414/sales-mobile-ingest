@@ -59,6 +59,30 @@ class MtpBridge:
             raise BridgeError(response.get("error", "MTP capability inspection failed"))
         return response
 
+    def discover_calllog_exports(
+        self,
+        *,
+        directory_names: list[str],
+        file_name_prefixes: list[str],
+        search_depth: int = 1,
+        maximum_files_per_directory: int = 25,
+    ) -> dict[str, Any]:
+        """Bounded read-only discovery of explicitly configured public XML export folders."""
+        if not directory_names or any(not _is_safe_mtp_segment(item) for item in directory_names):
+            raise BridgeError("calllog export directory names must be safe non-empty path segments")
+        if any(not _is_safe_filename_prefix(item) for item in file_name_prefixes):
+            raise BridgeError("calllog export filename prefixes must be safe simple prefixes")
+        response = self._run({
+            "operation": "discover_calllog_exports",
+            "directory_names": directory_names,
+            "file_name_prefixes": file_name_prefixes,
+            "search_depth": min(max(search_depth, 0), 2),
+            "maximum_files_per_directory": min(max(maximum_files_per_directory, 1), 100),
+        })
+        if not response.get("ok"):
+            raise BridgeError(response.get("error", "MTP call-log export discovery failed"))
+        return response
+
     def _run(self, payload: dict[str, Any], timeout: int = 45) -> dict[str, Any]:
         if not self.script_path.exists():
             raise BridgeError(f"MTP bridge script is missing: {self.script_path}")
@@ -83,3 +107,11 @@ class MtpBridge:
         if not isinstance(response, dict):
             raise BridgeError("PowerShell bridge returned a non-object response")
         return response
+
+
+def _is_safe_mtp_segment(value: str) -> bool:
+    return isinstance(value, str) and bool(value.strip()) and "/" not in value and "\\" not in value and len(value) <= 120
+
+
+def _is_safe_filename_prefix(value: str) -> bool:
+    return isinstance(value, str) and value and "/" not in value and "\\" not in value and len(value) <= 120

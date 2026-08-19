@@ -20,6 +20,7 @@ logs/
 *.part
 *.dump
 diagnostics/
+*.xml
 SalesMobileIngestData/
 
 # Local configuration and secrets

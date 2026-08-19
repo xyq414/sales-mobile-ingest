@@ -20,6 +20,17 @@ def build_parser() -> argparse.ArgumentParser:
     probe.add_argument("--data-root", dest="command_data_root", help=argparse.SUPPRESS)
     identity = subparsers.add_parser("investigate-identity", help="Read-only, privacy-preserving call identity investigation")
     identity.add_argument("--data-root", dest="command_data_root", help=argparse.SUPPRESS)
+    calllog_export = subparsers.add_parser(
+        "inspect-calllog-export",
+        help="Read one bounded public CallLog XML export into ignored diagnostics and emit a value-free schema summary",
+    )
+    calllog_export.add_argument("--data-root", dest="command_data_root", help=argparse.SUPPRESS)
+    calllog_ingest = subparsers.add_parser(
+        "ingest-calllog-export",
+        help="Incrementally parse a verified public CallLog XML export and enrich only unique recording matches",
+    )
+    calllog_ingest.add_argument("--once", action="store_true", required=True, help="Run one bounded CallLog export ingest pass")
+    calllog_ingest.add_argument("--data-root", dest="command_data_root", help=argparse.SUPPRESS)
     calllog_summary = subparsers.add_parser(
         "calllog-probe-summary",
         help="Create a safe local summary from an app-private Android CallLog probe result",
@@ -62,6 +73,14 @@ def main(argv: list[str] | None = None) -> int:
                 "call_log_transport": result["call_log_transport"],
                 "event": result["event"],
             }, ensure_ascii=False, indent=2))
+            return 0
+        if args.command == "inspect-calllog-export":
+            summary = ingestor.inspect_calllog_exports().as_dict()
+            print(json.dumps({"data_root": str(data_root), **summary}, ensure_ascii=False))
+            return 0
+        if args.command == "ingest-calllog-export":
+            summary = ingestor.ingest_calllog_exports().as_dict()
+            print(json.dumps({"data_root": str(data_root), **summary}, ensure_ascii=False))
             return 0
         if args.command == "calllog-probe-summary":
             summary = summarize_private_result(args.raw_result, args.event, args.safe_output)

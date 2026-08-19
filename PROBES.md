@@ -12,13 +12,13 @@ Probe sequence:
 
 If a phone is unavailable, code and synthetic tests remain valid, but physical-device E2E remains explicitly unverified.
 
-# Public CallLog XML export probe (current priority)
+# Public CallLog XML export probe (real-device verified)
 
 The next identity source is an explicitly user-created CallLog-only XML backup from SyncTech `SMS Backup & Restore`, accessed only as an ordinary public file through the same Windows Shell/MTP boundary. It is not an ADB source and it is not a replacement for the recording collector.
 
-The intended probe is bounded: detect the currently connected portable device, inspect only the selected public backup directory, list only expected call-log XML candidates, and copy a selected XML only into gitignored `data_root/diagnostics/calllog-backup` for local schema inspection. Normal output may contain only root/field names and types; raw XML, phone numbers, contact names and full values are local diagnostic evidence only.
+The probe is bounded: detect the currently connected portable device, inspect only the selected public backup directory, list only expected `calls-*.xml` candidates, and copy a selected XML only into gitignored `data_root/diagnostics/calllog-backup` for local schema inspection. Normal output may contain only root/field names and types; raw XML, phone numbers, contact names and full values are local diagnostic evidence only.
 
-Observed on 2026-08-19 after the user reported creating a CallLog-only backup: the first MTP probe and three 5-second retries each returned `devices=0`. Therefore the terminal probe status is `WINDOWS_MTP_DEVICE_NOT_CURRENTLY_AVAILABLE`. No directory/file was enumerated, no XML was copied or parsed, and no parser/correlation/event enrichment was implemented from an assumed schema. This is not evidence about whether the phone-side backup exists or contains calls.
+Observed later on 2026-08-19 after the phone was reconnected: Windows Shell/MTP found one OPPO A6 Pro 5G, one configured export directory and one XML candidate. The copied 656-byte artifact produced the actual `calls/call` schema; a SyncTech-specific parser, artifact/canonical-row dedupe and one `HIGH_CONFIDENCE` recording correlation passed. The event was atomically enriched, and repeated manual plus watcher runs made no duplicate recording, XML artifact, canonical row or event. The prior `WINDOWS_MTP_DEVICE_NOT_CURRENTLY_AVAILABLE` result remains an earlier physical-connection observation, not a parser failure.
 
 # Android CallLog feasibility probe
 

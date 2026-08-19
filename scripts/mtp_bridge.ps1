@@ -170,6 +170,52 @@ function Find-CandidateFolders([object]$FolderItem, [string]$RelativePath, [int]
     return $result
 }
 
+function Find-ExactFolders([object]$FolderItem, [string]$RelativePath, [int]$Depth, [int]$MaxDepth, [string[]]$Names) {
+    $result = @()
+    foreach ($child in @(Get-Children $FolderItem)) {
+        if (-not $child.IsFolder) { continue }
+        $childName = [string]$child.Name
+        $childRelative = Join-Relative $RelativePath $childName
+        foreach ($name in @($Names)) {
+            if ($childName.Equals($name, [System.StringComparison]::OrdinalIgnoreCase)) {
+                $result += [pscustomobject]@{ item = $child; relative_path = $childRelative }
+                break
+            }
+        }
+        if ($Depth -lt $MaxDepth -and $childName -notmatch '^(Android|data|obb)$') {
+            $result += @(Find-ExactFolders $child $childRelative ($Depth + 1) $MaxDepth $Names)
+        }
+    }
+    return $result
+}
+
+function Get-CallLogXmlFiles([object]$FolderItem, [string]$RelativePath, [string[]]$FileNamePrefixes, [int]$MaximumFiles) {
+    $result = @()
+    foreach ($child in @(Get-Children $FolderItem)) {
+        if ($child.IsFolder) { continue }
+        $fileName = Get-CanonicalFileName $child
+        $extension = Get-ItemExtension $child $fileName
+        if ($extension -ne '.xml') { continue }
+        $matchesPrefix = @($FileNamePrefixes).Count -eq 0
+        foreach ($prefix in @($FileNamePrefixes)) {
+            if ($fileName.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                $matchesPrefix = $true
+                break
+            }
+        }
+        if (-not $matchesPrefix) { continue }
+        $result += [pscustomobject]@{
+            name = $fileName
+            extension = $extension
+            relative_path = Join-Relative $RelativePath ([string]$child.Name)
+            size_bytes = Get-ItemSize $child
+            modified_at = Get-ItemModifiedAt $child
+        }
+        if ($result.Count -ge $MaximumFiles) { break }
+    }
+    return $result
+}
+
 function Resolve-RelativeItem([object]$Device, [string]$RelativePath) {
     $current = $Device
     foreach ($part in @($RelativePath -split '/')) {
@@ -344,6 +390,35 @@ function Invoke-Probe([object]$Shell, [object]$Payload) {
     return @{ ok = $true; observation = 'ok'; devices = $devices }
 }
 
+function Invoke-DiscoverCallLogExports([object]$Shell, [object]$Payload) {
+    $directoryNames = @($Payload.directory_names | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+    if ($directoryNames.Count -eq 0) { return @{ ok = $false; error = 'calllog_export_directory_names_required' } }
+    $prefixes = @($Payload.file_name_prefixes | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+    $maximumDepth = [Math]::Min([Math]::Max([int]$Payload.search_depth, 0), 2)
+    $maximumFiles = [Math]::Min([Math]::Max([int]$Payload.maximum_files_per_directory, 1), 100)
+    $devices = @()
+    foreach ($device in @(Get-PortableDevices $Shell)) {
+        $directories = @()
+        $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($storage in @(Get-Children $device)) {
+            if (-not $storage.IsFolder) { continue }
+            foreach ($found in @(Find-ExactFolders $storage ([string]$storage.Name) 0 $maximumDepth $directoryNames)) {
+                if (-not $seen.Add([string]$found.relative_path)) { continue }
+                $directories += [pscustomobject]@{
+                    relative_path = $found.relative_path
+                    files = @(Get-CallLogXmlFiles $found.item $found.relative_path $prefixes $maximumFiles)
+                }
+            }
+        }
+        $devices += [pscustomobject]@{
+            device_key = [string]$device.Path
+            display_name = [string]$device.Name
+            directories = $directories
+        }
+    }
+    return @{ ok = $true; observation = 'ok'; devices = $devices }
+}
+
 function Invoke-Copy([object]$Shell, [object]$Payload) {
     $source = $Payload.source
     $device = $null
@@ -400,6 +475,10 @@ try {
     }
     if ($payload.operation -eq 'capabilities') {
         Emit-Json (Invoke-Capabilities $shell)
+        exit 0
+    }
+    if ($payload.operation -eq 'discover_calllog_exports') {
+        Emit-Json (Invoke-DiscoverCallLogExports $shell $payload)
         exit 0
     }
     throw "unsupported_operation:$($payload.operation)"

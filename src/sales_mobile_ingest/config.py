@@ -49,6 +49,9 @@ def ensure_layout(data_root: Path) -> dict[str, Path]:
         "failed": data_root / "failed" / "recordings",
         "state": data_root / "state",
         "logs": data_root / "logs",
+        "calllog_diagnostics": data_root / "diagnostics" / "calllog-backup",
+        "calllog_stage": data_root / "diagnostics" / "calllog-backup" / ".stage",
+        "calllog_failed": data_root / "diagnostics" / "calllog-backup" / "failed",
     }
     for path in paths.values():
         path.mkdir(parents=True, exist_ok=True)

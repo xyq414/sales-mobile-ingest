@@ -43,6 +43,12 @@ python -m venv .venv
 # 对唯一 ready 录音执行只读的号码/通话记录能力调查；原始敏感证据只保存在本机 diagnostics
 .\.venv\Scripts\python.exe -m sales_mobile_ingest investigate-identity
 
+# 仅读取得受限公共 XML，并输出不含字段值的真实 schema 摘要
+.\.venv\Scripts\python.exe -m sales_mobile_ingest inspect-calllog-export
+
+# 增量解析已验证的公共 XML；只在唯一 HIGH_CONFIDENCE / EXACT 匹配时原子 enrich event
+.\.venv\Scripts\python.exe -m sales_mobile_ingest ingest-calllog-export --once
+
 # 一次增量采集
 .\.venv\Scripts\python.exe -m sales_mobile_ingest ingest --once --data-root "F:\CompanyData\SalesMobile"
 
@@ -77,6 +83,7 @@ failed/recordings/         # 保留失败证据，不静默丢失
 state/                     # 增量导入状态和成功目录缓存
 logs/                      # 隐私最小化运行日志
 diagnostics/probe-reports/ # gitignored 的脱敏本机诊断
+diagnostics/calllog-backup/ # gitignored 的原始公共 XML、schema 与关联摘要
 ```
 
 ## 真实状态
@@ -87,11 +94,11 @@ diagnostics/probe-reports/ # gitignored 的脱敏本机诊断
 
 当前真实 OPPO 样本的电话身份能力边界见 [docs/通话身份解析能力.md](docs/通话身份解析能力.md)。它明确区分“录音自身没有号码证据”与“普通 MTP/WPD 不公开通话记录”，不会把任意长数字或文件修改时间伪装成客户身份。
 
-## 公共 CallLog XML 导出（当前优先验证）
+## 公共 CallLog XML 导出（首个已验证外部导出器）
 
 当前选择的下一条来源是用户主动在手机上使用 SyncTech `SMS Backup & Restore` 创建的 **CallLog-only 本地 XML 备份**，再经普通 USB/MTP 只读取得。它不是本项目的永久厂商依赖，也不需要 ADB、开发者模式或项目自带 Android App。
 
-在 Windows 真机重新发现该 XML、且只输出真实根节点/字段名/字段类型的安全 schema 摘要前，项目不会猜测 XML 格式、不会解析号码、不会把任何内容写入 `ready/events`。原始 XML 即使将来被读取，也只能保存在 gitignored 的 `data_root/diagnostics/calllog-backup`，不构成 downstream contract。设计边界、隐私规则、关联判定和官方资料结论见 [docs/通话记录导出接口.md](docs/通话记录导出接口.md)。
+OPPO A6 Pro 5G 已通过普通 MTP 真机验证：仅在 `SMSBackupRestore` 中有界发现一个 `calls-*.xml`、以 staging → size → SHA-256 复制到 gitignored diagnostics，按真实 `calls/call` schema 解析。XML artifact、canonical row 与 event 均已验证重复运行不产生第二份对象。当前真实关联为 `HIGH_CONFIDENCE`，不会伪称 `EXACT`；原始 XML 不构成 downstream contract。设计边界、隐私规则和证据说明见 [docs/通话记录导出接口.md](docs/通话记录导出接口.md)。
 
 ## 历史 Android CallLog feasibility probe（非生产、非当前优先路径）
 
