@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import tempfile
 import uuid
@@ -11,8 +12,9 @@ from typing import Any, Callable
 
 from .adapters import classify_candidate, device_identity
 from .bridge import MtpBridge
-from .config import ensure_layout
+from .config import ensure_layout, resolve_salesperson_id
 from .contract import build_metadata, iso_now, sha256_file, validate_recording
+from .events import build_communication_event, event_path, validate_event, write_event_atomically
 from .state import StateStore
 
 
@@ -25,6 +27,9 @@ class IngestSummary:
     duplicates: int = 0
     failures: int = 0
     source_attempts: int = 0
+    events_created: int = 0
+    events_existing: int = 0
+    event_failures: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -35,6 +40,9 @@ class IngestSummary:
             "duplicates": self.duplicates,
             "failures": self.failures,
             "source_attempts": self.source_attempts,
+            "events_created": self.events_created,
+            "events_existing": self.events_existing,
+            "event_failures": self.event_failures,
         }
 
 
@@ -51,9 +59,13 @@ class Ingestor:
         self.bridge = bridge or MtpBridge()
         self.state = StateStore(self.paths["state"])
         self.sidecar_writer = sidecar_writer or self._write_sidecar_atomically
+        self.salesperson_id = resolve_salesperson_id()
 
     def probe(self) -> dict[str, Any]:
         raw = self.bridge.probe(self.state.known_dirs())
+        return self._probe_from_raw(raw)
+
+    def _probe_from_raw(self, raw: dict[str, Any]) -> dict[str, Any]:
         result: list[dict[str, Any]] = []
         for device in raw.get("devices", []):
             vendor, model = device_identity(device.get("display_name"))
@@ -69,6 +81,7 @@ class Ingestor:
                     "audio_files": len(candidate.get("files", [])),
                     "accepted": decision.accepted,
                     "adapter": decision.adapter,
+                    "adapter_evidence_status": decision.adapter_evidence_status,
                     "score": decision.score,
                     "evidence": decision.evidence,
                     "from_cached_directory": bool(candidate.get("from_cached_directory")),
@@ -82,6 +95,83 @@ class Ingestor:
             })
         return {"devices": result, "bridge_observation": raw.get("observation", "ok")}
 
+    def save_probe_report(self) -> Path:
+        """Persist a diagnostic report with structural filename facts only."""
+        raw = self.bridge.probe(self.state.known_dirs())
+        report = {
+            "report_schema_version": "probe-report/v1",
+            "created_at": iso_now(),
+            "bridge_observation": raw.get("observation", "ok"),
+            "devices": [],
+        }
+        for device in raw.get("devices", []):
+            vendor, model = device_identity(device.get("display_name"))
+            candidates: list[dict[str, Any]] = []
+            for candidate in device.get("candidates", []):
+                files = candidate.get("files", [])
+                decision = classify_candidate(
+                    device_name=device.get("display_name"), relative_path=candidate["relative_path"], files=files
+                )
+                extensions: dict[str, int] = {}
+                total_size = 0
+                patterns: list[dict[str, Any]] = []
+                seen_patterns: set[str] = set()
+                for item in files:
+                    extension = str(item.get("extension") or "").lower()
+                    extensions[extension] = extensions.get(extension, 0) + 1
+                    total_size += int(item.get("size_bytes") or 0)
+                    pattern = self._safe_filename_pattern(str(item.get("name") or ""), extension)
+                    fingerprint = json.dumps(pattern, sort_keys=True)
+                    if fingerprint not in seen_patterns:
+                        patterns.append(pattern)
+                        seen_patterns.add(fingerprint)
+                candidates.append({
+                    "relative_path": candidate["relative_path"],
+                    "audio_file_count": len(files),
+                    "extension_distribution": extensions,
+                    "total_size_bytes": total_size,
+                    "metadata_available": {
+                        "size_bytes": any(item.get("size_bytes") is not None for item in files),
+                        "modified_at": any(item.get("modified_at") is not None for item in files),
+                        "duration_seconds": any(item.get("duration_seconds") is not None for item in files),
+                    },
+                    "filename_structure_patterns": patterns,
+                    "accepted": decision.accepted,
+                    "adapter": decision.adapter,
+                    "adapter_evidence_status": decision.adapter_evidence_status,
+                    "evidence": decision.evidence,
+                    "probable_call_recording": decision.accepted,
+                    "eligible_for_ingest_smoke_test": decision.accepted and bool(files),
+                })
+            report["devices"].append({
+                "vendor": vendor,
+                "model": model,
+                "transport": "Windows Shell / MTP-WPD",
+                "storage_root_count": len(device.get("storage_roots", [])),
+                "candidate_count": len(candidates),
+                "candidates": candidates,
+            })
+        reports_dir = self.data_root / "diagnostics" / "probe-reports"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        safe_timestamp = iso_now().replace(":", "").replace("+", "_")
+        output = reports_dir / f"probe-{safe_timestamp}.json"
+        self._write_json_atomic(output, report)
+        self._log("probe_report_saved", {"device_count": len(report["devices"]), "candidate_count": sum(row["candidate_count"] for row in report["devices"])})
+        return output
+
+    @staticmethod
+    def _safe_filename_pattern(name: str, extension: str) -> dict[str, Any]:
+        stem = name[:-len(extension)] if extension and name.casefold().endswith(extension.casefold()) else name
+        digit_runs = [len(match.group(0)) for match in re.finditer(r"\d+", stem)]
+        datetime_match = re.search(r"(?:19|20)\d{2}[-_]?\d{2}[-_]?\d{2}[ _-]?\d{2}[-_]?\d{2}[-_]?\d{2}", stem)
+        return {
+            "basename_length": len(name),
+            "extension": extension,
+            "digit_run_lengths": digit_runs,
+            "separators": sorted(set(character for character in stem if character in "-_ .()")),
+            "datetime_token_start": datetime_match.start() if datetime_match else None,
+        }
+
     def ingest_once(self, limit: int | None = None) -> IngestSummary:
         if limit is not None and limit < 1:
             raise ValueError("limit must be at least 1")
@@ -90,6 +180,7 @@ class Ingestor:
         raw = self.bridge.probe(self.state.known_dirs())
         devices = raw.get("devices", [])
         summary.devices = len(devices)
+        self._refresh_legacy_duration_provenance(raw)
         for device in devices:
             vendor, model = device_identity(device.get("display_name"))
             accepted_any = False
@@ -118,6 +209,7 @@ class Ingestor:
                         "device_vendor": vendor,
                         "device_model": model,
                         "adapter": decision.adapter,
+                        "duration_source": "wpd" if item.get("duration_seconds") is not None else "unknown",
                     }
                     summary.source_attempts += 1
                     outcome = self._ingest_source(source)
@@ -153,7 +245,7 @@ class Ingestor:
                             if limit is not None and summary.source_attempts >= limit:
                                 stop_requested = True
                                 break
-                            source = {**item, "device_key": device["device_key"], "device_name": device.get("display_name"), "device_vendor": vendor, "device_model": model, "adapter": decision.adapter}
+                            source = {**item, "device_key": device["device_key"], "device_name": device.get("display_name"), "device_vendor": vendor, "device_model": model, "adapter": decision.adapter, "duration_source": "wpd" if item.get("duration_seconds") is not None else "unknown"}
                             summary.source_attempts += 1
                             outcome = self._ingest_source(source)
                             if outcome == "imported":
@@ -171,12 +263,18 @@ class Ingestor:
             if stop_requested:
                 break
         self.state.save()
+        event_summary = self._reconcile_events()
+        summary.events_created += event_summary["created"]
+        summary.events_existing += event_summary["existing"]
+        summary.event_failures += event_summary["failures"]
+        self.state.save()
         self._log("ingest", summary.as_dict())
         return summary
 
     def ingest_staged_for_test(self, staged_path: Path, source: dict[str, Any]) -> str:
         """Commit a locally created staging file; used only by synthetic regression tests."""
         outcome = self._commit_staged(staged_path, source)
+        self._reconcile_events()
         self.state.save()
         return outcome
 
@@ -245,6 +343,55 @@ class Ingestor:
         self.state.remember_import(sha256, media_path.name)
         self.state.remember_source(source_key, actual_size, source.get("modified_at"), sha256)
         return "imported"
+
+    def _refresh_legacy_duration_provenance(self, raw: dict[str, Any]) -> None:
+        """Upgrade only a legacy sidecar that can be matched to current WPD metadata."""
+        durations: dict[str, float] = {}
+        for device in raw.get("devices", []):
+            for candidate in device.get("candidates", []):
+                for item in candidate.get("files", []):
+                    value = item.get("duration_seconds")
+                    if value is not None:
+                        durations[str(item.get("relative_path"))] = float(value)
+        if not durations:
+            return
+        for metadata_path in self.paths["ready"].glob("*.json"):
+            try:
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            source_path = str(metadata.get("source_relative_path") or "")
+            duration = durations.get(source_path)
+            if duration is None or metadata.get("duration_source") == "wpd":
+                continue
+            if metadata.get("duration_seconds") is None:
+                continue
+            if abs(float(metadata["duration_seconds"]) - duration) > 0.001:
+                continue
+            updated = {**metadata, "duration_source": "wpd"}
+            validate_recording(updated)
+            self._write_sidecar_atomically(metadata_path, updated)
+
+    def _reconcile_events(self) -> dict[str, int]:
+        result = {"created": 0, "existing": 0, "failures": 0}
+        installation_id = self.state.installation_id()
+        for recording_path in self.paths["ready"].glob("*.json"):
+            try:
+                recording = json.loads(recording_path.read_text(encoding="utf-8"))
+                validate_recording(recording)
+                media_path = self.paths["ready"] / str(recording["media_filename"])
+                if not media_path.is_file() or sha256_file(media_path) != recording["sha256"]:
+                    raise RuntimeError("recording media is absent or its sha256 differs")
+                event = build_communication_event(
+                    recording=recording, installation_id=installation_id, salesperson_id=self.salesperson_id
+                )
+                validate_event(event)
+                created = write_event_atomically(event_path(self.paths["events"], event), event, media_path, recording_path)
+                result["created" if created else "existing"] += 1
+            except Exception as exc:
+                result["failures"] += 1
+                self._log("event_failure", {"reason": str(exc)[:300]})
+        return result
 
     def _recorded_timestamp(self, source: dict[str, Any]) -> tuple[str, str]:
         from .contract import recorded_time_from_evidence

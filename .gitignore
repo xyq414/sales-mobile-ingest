@@ -4,6 +4,8 @@ data_root/
 inbox/
 ready/
 failed/
+processed/
+archive/
 state/
 logs/
 *.m4a
@@ -17,6 +19,8 @@ logs/
 *.opus
 *.part
 *.dump
+diagnostics/
+SalesMobileIngestData/
 
 # Local configuration and secrets
 .env

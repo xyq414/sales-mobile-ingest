@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +57,13 @@ class StateStore:
 
     def remember_import(self, sha256: str, media_filename: str) -> None:
         self.data["imports"][sha256] = {"media_filename": media_filename}
+
+    def installation_id(self) -> str:
+        value = self.data.get("installation_id")
+        if not isinstance(value, str) or not value:
+            value = f"ins_{uuid.uuid4()}"
+            self.data["installation_id"] = value
+        return value
 
     def known_dirs(self) -> list[dict[str, str]]:
         result: list[dict[str, str]] = []

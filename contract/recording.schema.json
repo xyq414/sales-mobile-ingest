@@ -28,6 +28,7 @@
     "contact_name": {"type": ["string", "null"]},
     "call_direction": {"enum": ["incoming", "outgoing", "unknown", null]},
     "duration_seconds": {"type": ["number", "integer", "null"], "minimum": 0},
+    "duration_source": {"enum": ["wpd", "media_probe", "unknown"]},
     "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
     "media_filename": {"type": "string", "pattern": "^[^\\\\/]+\\.[A-Za-z0-9]{1,10}$"},
     "imported_at": {"type": "string", "format": "date-time"},

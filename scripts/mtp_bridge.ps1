@@ -51,7 +51,7 @@ function Join-Relative([string]$Parent, [string]$Name) {
 function Candidate-Names {
     $tongHuaLuYin = ([char]0x901A).ToString() + ([char]0x8BDD).ToString() + ([char]0x5F55).ToString() + ([char]0x97F3).ToString()
     $luYin = ([char]0x5F55).ToString() + ([char]0x97F3).ToString()
-    return @('Recordings', 'Recorder', 'Record', 'Call Recordings', 'CallRecord', 'Call Recording', $tongHuaLuYin, $luYin)
+    return @('Recordings', 'Recorder', 'Record', 'Call Recordings', 'CallRecord', 'Call Recording', 'call_rec', 'sound_recorder', 'Sounds', $tongHuaLuYin, $luYin)
 }
 
 function Is-CandidateName([string]$Name) {

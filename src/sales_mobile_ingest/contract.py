@@ -92,6 +92,7 @@ def build_metadata(
         "contact_name": None,
         "call_direction": "unknown",
         "duration_seconds": source.get("duration_seconds"),
+        "duration_source": source.get("duration_source", "wpd" if source.get("duration_seconds") is not None else "unknown"),
         "sha256": sha256,
         "media_filename": media_filename,
         "imported_at": imported_at,

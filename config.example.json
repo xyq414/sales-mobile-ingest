@@ -1,4 +1,5 @@
 {
   "data_root": "%USERPROFILE%\\Documents\\SalesMobileIngestData",
-  "watch_interval_seconds": 45
+  "watch_interval_seconds": 45,
+  "salesperson_id": null
 }

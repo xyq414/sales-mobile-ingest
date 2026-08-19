@@ -5,9 +5,22 @@ from pathlib import Path
 
 import pytest
 
-from sales_mobile_ingest.adapters import classify_candidate
+from sales_mobile_ingest.adapters import (
+    DOC_EVIDENCE_UNAVAILABLE,
+    OFFICIAL_DOC_CANDIDATE,
+    REAL_DEVICE_VERIFIED,
+    adapter_profiles,
+    classify_candidate,
+)
 from sales_mobile_ingest.config import ensure_layout, resolve_data_root
 from sales_mobile_ingest.contract import build_metadata, sha256_file, validate_recording
+from sales_mobile_ingest.events import (
+    EventValidationError,
+    build_communication_event,
+    normalise_phone_number,
+    validate_event,
+    write_event_atomically,
+)
 from sales_mobile_ingest.service import Ingestor
 
 
@@ -35,6 +48,11 @@ def stage_file(tmp_path: Path, name: str, content: bytes = b"synthetic-call-reco
 def test_schema_example_is_valid() -> None:
     example = Path(__file__).parents[1] / "contract" / "examples" / "20250115_101530_8ed3c2f1a4b5.json"
     validate_recording(json.loads(example.read_text(encoding="utf-8")))
+
+
+def test_communication_event_example_is_valid() -> None:
+    example = Path(__file__).parents[1] / "contract" / "examples" / "communication_event.phone_call.example.json"
+    validate_event(json.loads(example.read_text(encoding="utf-8")))
 
 
 def test_nullable_fields_and_stable_content_identity(tmp_path: Path) -> None:
@@ -164,3 +182,98 @@ def test_one_shot_limit_prevents_first_connection_from_copying_every_candidate(t
     assert summary.new_imports == 1
     assert summary.source_attempts == 1
     assert len(list(ingestor.paths["ready"].glob("*.json"))) == 1
+
+
+def test_vendor_profiles_are_explicit_about_evidence_and_path_certification() -> None:
+    profiles = {profile.vendor: profile for profile in adapter_profiles()}
+    assert profiles["OPPO"].evidence_status == REAL_DEVICE_VERIFIED
+    assert profiles["OPPO"].validation_device == "OPPO A6 Pro 5G"
+    assert profiles["Xiaomi"].evidence_status == OFFICIAL_DOC_CANDIDATE
+    assert profiles["Huawei"].evidence_status == OFFICIAL_DOC_CANDIDATE
+    assert profiles["Honor"].evidence_status == OFFICIAL_DOC_CANDIDATE
+    assert profiles["vivo"].evidence_status == DOC_EVIDENCE_UNAVAILABLE
+
+
+def test_official_document_candidate_is_accepted_without_being_claimed_verified() -> None:
+    decision = classify_candidate(
+        device_name="Xiaomi synthetic",
+        relative_path="Internal/MIUI/sound_recorder/call_rec",
+        files=[{"name": "20250115_101530.m4a", "extension": ".m4a"}],
+    )
+    assert decision.accepted
+    assert decision.adapter == "xiaomi-miui-hyperos-v1"
+    assert decision.adapter_evidence_status == OFFICIAL_DOC_CANDIDATE
+
+
+def test_vendor_without_documented_path_can_use_generic_explicit_call_fallback() -> None:
+    decision = classify_candidate(
+        device_name="vivo synthetic",
+        relative_path="Internal/Call Recordings",
+        files=[{"name": "opaque.mp3", "extension": ".mp3"}],
+    )
+    assert decision.accepted
+    assert decision.adapter == "generic-call-recording-v1"
+
+
+def test_phone_normalisation_is_conservative() -> None:
+    assert normalise_phone_number(" +86 (155) 0000-1234 ") == "+8615500001234"
+    assert normalise_phone_number("155 0000 1234") == "15500001234"
+    assert normalise_phone_number("call-15500001234") is None
+    assert normalise_phone_number(None) is None
+
+
+def test_event_is_deterministic_relative_and_created_after_recording_pair(tmp_path: Path) -> None:
+    ingestor = Ingestor(tmp_path / "data")
+    staged = stage_file(ingestor.paths["stage"], "20250115_101530_call.m4a")
+    assert ingestor.ingest_staged_for_test(staged, source_for(staged)) == "imported"
+    events = list(ingestor.paths["events"].glob("*.json"))
+    assert len(events) == 1
+    event = json.loads(events[0].read_text(encoding="utf-8"))
+    validate_event(event)
+    assert event["media_ref"].startswith("ready/recordings/")
+    assert not Path(event["media_ref"]).is_absolute()
+    assert event["salesperson_id"] is None
+    assert event["salesperson_identity_status"] == "UNCONFIGURED"
+    recording = json.loads(next(ingestor.paths["ready"].glob("*.json")).read_text(encoding="utf-8"))
+    rebuilt = build_communication_event(recording=recording, installation_id=event["installation_id"], salesperson_id=None)
+    assert rebuilt["event_id"] == event["event_id"]
+    assert ingestor._reconcile_events()["created"] == 0
+    assert len(list(ingestor.paths["events"].glob("*.json"))) == 1
+
+
+def test_event_writer_refuses_commit_without_complete_recording_pair(tmp_path: Path) -> None:
+    media = stage_file(tmp_path, "audio.m4a")
+    recording = build_metadata(
+        source=source_for(media), sha256=sha256_file(media), media_filename=media.name,
+        imported_at="2025-01-15T02:15:30+00:00",
+    )
+    event = build_communication_event(recording=recording, installation_id="ins_00000000-0000-0000-0000-000000000000", salesperson_id=None)
+    with pytest.raises(EventValidationError):
+        write_event_atomically(tmp_path / "event.json", event, media, tmp_path / "recording.json")
+
+
+def test_probe_report_redacts_raw_filename_and_phone_like_content(tmp_path: Path) -> None:
+    class FakeBridge:
+        def probe(self, cached_dirs: list[dict[str, str]], search_depth: int = 3) -> dict:
+            return {"devices": [{
+                "device_key": "secret-serial-never-report", "display_name": "OPPO fixture", "storage_roots": ["Internal"],
+                "candidates": [{"relative_path": "Internal/Music/Recordings/Call Recordings", "files": [{
+                    "name": "Sensitive-15500001234-20250115_101530.mp3", "extension": ".mp3", "relative_path": "private/file", "size_bytes": 9,
+                    "modified_at": "2025-01-15T02:15:30+00:00", "duration_seconds": 9.0,
+                }]}],
+            }]}
+
+    ingestor = Ingestor(tmp_path / "data", bridge=FakeBridge())
+    report_path = ingestor.save_probe_report()
+    report_text = report_path.read_text(encoding="utf-8")
+    assert "Sensitive-15500001234" not in report_text
+    assert "secret-serial" not in report_text
+    report = json.loads(report_text)
+    assert report["devices"][0]["candidates"][0]["filename_structure_patterns"][0]["extension"] == ".mp3"
+
+
+def test_legacy_recording_without_additive_duration_source_still_valid(tmp_path: Path) -> None:
+    staged = stage_file(tmp_path, "20250115_101530_call.m4a")
+    metadata = build_metadata(source=source_for(staged), sha256=sha256_file(staged), media_filename=staged.name)
+    metadata.pop("duration_source")
+    validate_recording(metadata)
