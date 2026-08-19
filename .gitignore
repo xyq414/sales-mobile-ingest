@@ -1,0 +1,42 @@
+# Real local data and device observations
+.local-data/
+data_root/
+inbox/
+ready/
+failed/
+state/
+logs/
+*.m4a
+*.amr
+*.mp3
+*.wav
+*.aac
+*.ogg
+*.flac
+*.3gp
+*.opus
+*.part
+*.dump
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+config.local.*
+
+# Python environments and generated files
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+build/
+dist/
+
+# Editors and Windows noise
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
