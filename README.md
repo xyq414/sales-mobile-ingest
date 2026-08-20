@@ -52,9 +52,9 @@ python -m venv .venv
 # 只读检查坚果云客户端、已配置 root 与候选同步目录；多个候选时不会猜测
 .\.venv\Scripts\python.exe -m sales_mobile_ingest inspect-cloud-handoff
 
-# 一次性设置明确的业务销售身份和用户确认的坚果云同步子目录（均写入 gitignored config.local.json）
+# 一次性设置明确的业务销售身份和用户确认的坚果云同步根（均写入 gitignored config.local.json）
 .\.venv\Scripts\python.exe -m sales_mobile_ingest configure-salesperson --salesperson-id "S007" --salesperson-name "张三"
-.\.venv\Scripts\python.exe -m sales_mobile_ingest configure-cloud-handoff --root "<坚果云同步目录内的销售通话数据>"
+.\.venv\Scripts\python.exe -m sales_mobile_ingest configure-cloud-handoff --sync-root "<用户确认的坚果云同步根>"
 
 # 从当前 ready recording/event 构建并发布完整三文件电话包；watch 也会自动执行
 .\.venv\Scripts\python.exe -m sales_mobile_ingest publish-cloud-handoff --once

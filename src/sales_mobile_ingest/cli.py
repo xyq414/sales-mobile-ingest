@@ -9,6 +9,7 @@ from .android_calllog_probe import summarize_private_result
 from .bridge import BridgeError
 from .cloud_handoff import (
     inspect_jianguoyun_environment,
+    sanitize_windows_component,
     validate_cloud_handoff_root,
     validate_cloud_package,
 )
@@ -57,7 +58,10 @@ def build_parser() -> argparse.ArgumentParser:
     configure_handoff = subparsers.add_parser(
         "configure-cloud-handoff", help="Set an explicitly chosen existing cloud client sync subdirectory",
     )
-    configure_handoff.add_argument("--root", required=True, help="Existing absolute cloud handoff directory; never guessed")
+    handoff_root = configure_handoff.add_mutually_exclusive_group(required=True)
+    handoff_root.add_argument("--root", help="Existing absolute cloud handoff directory; never guessed")
+    handoff_root.add_argument("--sync-root", help="Explicitly confirmed existing sync root; a dedicated child is created once")
+    configure_handoff.add_argument("--folder-name", default="销售通话数据", help="Dedicated child directory when --sync-root is used")
     configure_handoff.add_argument("--data-root", dest="command_data_root", help=argparse.SUPPRESS)
     inspect_handoff = subparsers.add_parser(
         "inspect-cloud-handoff", help="Read-only Nutstore client and sync-root candidate inspection",
@@ -129,10 +133,17 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"status": "SALESPERSON_IDENTITY_CONFIGURED", "config_path": "config.local.json"}, ensure_ascii=False))
             return 0
         if args.command == "configure-cloud-handoff":
-            root = resolve_cloud_handoff_root(args.root)
+            root = resolve_cloud_handoff_root(args.root or args.sync_root)
             if root is None:
                 raise ConfigError("cloud_handoff_root is required")
-            validated = validate_cloud_handoff_root(data_root, root)
+            if args.sync_root:
+                sync_root = validate_cloud_handoff_root(data_root, root)
+                folder_name = sanitize_windows_component(args.folder_name)
+                candidate = sync_root / folder_name
+                candidate.mkdir(exist_ok=True)
+                validated = validate_cloud_handoff_root(data_root, candidate)
+            else:
+                validated = validate_cloud_handoff_root(data_root, root)
             update_local_config({"cloud_handoff_root": str(validated)})
             print(json.dumps({"status": "CLOUD_HANDOFF_ROOT_CONFIGURED", "config_path": "config.local.json"}, ensure_ascii=False))
             return 0

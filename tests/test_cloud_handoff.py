@@ -17,6 +17,7 @@ from sales_mobile_ingest.cloud_handoff import (
     validate_cloud_package,
 )
 from sales_mobile_ingest.config import SalespersonIdentity
+from sales_mobile_ingest.cli import main as cli_main
 from sales_mobile_ingest.contract import build_metadata, sha256_file
 from sales_mobile_ingest.events import build_communication_event
 from sales_mobile_ingest.state import StateStore
@@ -102,6 +103,19 @@ def test_salesperson_identity_is_only_valid_when_id_and_name_are_both_configured
     assert config_module.resolve_salesperson_identity() is None
     config_module.update_local_config({"salesperson_name": "Synthetic Sales"})
     assert config_module.resolve_salesperson_identity() == IDENTITY
+
+
+def test_confirmed_sync_root_creates_only_a_dedicated_child_and_configures_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(config_module, "PROJECT_ROOT", tmp_path)
+    data_root = tmp_path / "data"
+    sync_root = tmp_path / "confirmed-sync-root"
+    sync_root.mkdir()
+    assert cli_main([
+        "--data-root", str(data_root), "configure-cloud-handoff", "--sync-root", str(sync_root),
+    ]) == 0
+    handoff = sync_root / "销售通话数据"
+    assert handoff.is_dir()
+    assert config_module.local_config()["cloud_handoff_root"] == str(handoff.resolve())
 
 
 def test_cloud_publish_creates_exactly_three_portable_files(tmp_path: Path) -> None:
