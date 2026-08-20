@@ -531,7 +531,9 @@ def test_phone_normalisation_is_conservative() -> None:
     assert normalise_phone_number(None) is None
 
 
-def test_event_is_deterministic_relative_and_created_after_recording_pair(tmp_path: Path) -> None:
+def test_event_is_deterministic_relative_and_created_after_recording_pair(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Unit fixtures must not inherit a developer machine's ignored business identity.
+    monkeypatch.setattr("sales_mobile_ingest.service.resolve_salesperson_identity", lambda: None)
     ingestor = Ingestor(tmp_path / "data")
     staged = stage_file(ingestor.paths["stage"], "20250115_101530_call.m4a")
     assert ingestor.ingest_staged_for_test(staged, source_for(staged)) == "imported"

@@ -101,6 +101,8 @@ diagnostics/calllog-backup/ # gitignored 的原始公共 XML、schema 与关联�
 
 参见 [docs/当前状态.md](docs/当前状态.md) 与 [docs/厂商适配矩阵.md](docs/厂商适配矩阵.md)。前者严格区分合成测试和本机真机验证；后者将 `REAL_DEVICE_VERIFIED`、`OFFICIAL_DOC_CANDIDATE`、`DOC_EVIDENCE_UNAVAILABLE` 与 generic heuristic 明确分开。
 
+截至 2026-08-20，本开发机已用显式开发测试身份 `DEV-001 / 开发者测试` 完成一次真实三文件电话包的本地坚果云 handoff、重复发布去重和 watcher 重启验证；该身份与 handoff root 都只在 gitignored 本机配置中。已验证的是运行中的坚果云客户端对已注册本地 sync root 的交付边界，不等同于远端传播或云端消费者验收。
+
 下游事件语义见 [contract/通信事件接口说明.md](contract/通信事件接口说明.md)。可选的 `salesperson_id` 只能写入本机 gitignored `config.local.json`；未配置时事件明确为 `UNCONFIGURED`，程序绝不从 Windows 或 Git 身份猜测。
 
 正式云端消费者接口见 [docs/云端电话包接口.md](docs/云端电话包接口.md)：每通电话只有 `audio.<ext>`、`recording.json`、`event.json` 三个文件。`data_root` 的 state、日志、诊断和 XML 永不作为坚果云交付目录整体同步。
