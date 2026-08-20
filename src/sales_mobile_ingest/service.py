@@ -24,7 +24,8 @@ from .calllog_export import (
     registered_calllog_export_providers,
     safe_rows_summary,
 )
-from .config import ensure_layout, resolve_salesperson_id
+from .cloud_handoff import CloudHandoffPublisher, CloudPublishSummary
+from .config import ensure_layout, resolve_cloud_handoff_root, resolve_salesperson_identity
 from .contract import build_metadata, iso_now, sha256_file, validate_recording
 from .events import (
     build_communication_event,
@@ -64,8 +65,15 @@ class IngestSummary:
     calllog_canonical_rows_new: int = 0
     calllog_events_enriched: int = 0
     calllog_failures: int = 0
+    cloud_packages_published: int = 0
+    cloud_packages_already_published: int = 0
+    cloud_packages_immutable_enrichment_pending: int = 0
+    cloud_packages_conflicts: int = 0
+    cloud_packages_blocked: int = 0
+    cloud_packages_failures: int = 0
+    cloud_handoff_status: str = "NOT_RUN"
 
-    def as_dict(self) -> dict[str, int]:
+    def as_dict(self) -> dict[str, Any]:
         return {
             "devices": self.devices,
             "candidates_scanned": self.candidates_scanned,
@@ -82,6 +90,13 @@ class IngestSummary:
             "calllog_canonical_rows_new": self.calllog_canonical_rows_new,
             "calllog_events_enriched": self.calllog_events_enriched,
             "calllog_failures": self.calllog_failures,
+            "cloud_packages_published": self.cloud_packages_published,
+            "cloud_packages_already_published": self.cloud_packages_already_published,
+            "cloud_packages_immutable_enrichment_pending": self.cloud_packages_immutable_enrichment_pending,
+            "cloud_packages_conflicts": self.cloud_packages_conflicts,
+            "cloud_packages_blocked": self.cloud_packages_blocked,
+            "cloud_packages_failures": self.cloud_packages_failures,
+            "cloud_handoff_status": self.cloud_handoff_status,
         }
 
 
@@ -140,7 +155,7 @@ class Ingestor:
         self.bridge = bridge or MtpBridge()
         self.state = StateStore(self.paths["state"])
         self.sidecar_writer = sidecar_writer or self._write_sidecar_atomically
-        self.salesperson_id = resolve_salesperson_id()
+        self.salesperson_identity = resolve_salesperson_identity()
 
     def probe(self) -> dict[str, Any]:
         raw = self.bridge.probe(self.state.known_dirs())
@@ -616,7 +631,10 @@ class Ingestor:
                 validate_event(candidate)
                 return candidate_path, candidate
         event = build_communication_event(
-            recording=recording, installation_id=self.state.installation_id(), salesperson_id=self.salesperson_id
+            recording=recording,
+            installation_id=self.state.installation_id(),
+            salesperson_id=self.salesperson_identity.salesperson_id if self.salesperson_identity else None,
+            salesperson_name=self.salesperson_identity.salesperson_name if self.salesperson_identity else None,
         )
         return event_path(self.paths["events"], event), event
 
@@ -638,7 +656,10 @@ class Ingestor:
         validate_recording(updated_recording)
         self._write_sidecar_atomically(recording_path, updated_recording)
         updated_event = build_communication_event(
-            recording=updated_recording, installation_id=event["installation_id"], salesperson_id=self.salesperson_id
+            recording=updated_recording,
+            installation_id=event["installation_id"],
+            salesperson_id=self.salesperson_identity.salesperson_id if self.salesperson_identity else None,
+            salesperson_name=self.salesperson_identity.salesperson_name if self.salesperson_identity else None,
         )
         media_path = self.paths["ready"] / str(updated_recording["media_filename"])
         if event_path_value.exists():
@@ -765,6 +786,20 @@ class Ingestor:
             # Call-log export is optional enrichment. It must not block a sound recording import.
             summary.calllog_failures += 1
             self._log("calllog_export_failure", {"reason": str(exc)[:300]})
+        try:
+            cloud_summary = self.publish_cloud_handoff()
+            summary.cloud_handoff_status = cloud_summary.status
+            summary.cloud_packages_published = cloud_summary.published
+            summary.cloud_packages_already_published = cloud_summary.already_published
+            summary.cloud_packages_immutable_enrichment_pending = cloud_summary.immutable_enrichment_pending
+            summary.cloud_packages_conflicts = cloud_summary.conflicts
+            summary.cloud_packages_blocked = cloud_summary.blocked
+            summary.cloud_packages_failures = cloud_summary.failures
+        except Exception as exc:
+            # Cloud delivery is independent from recording acquisition and cannot stop it.
+            summary.cloud_handoff_status = "CLOUD_HANDOFF_FAILURE"
+            summary.cloud_packages_failures += 1
+            self._log("cloud_handoff_failure", {"reason": str(exc)[:300]})
         self.state.save()
         self._log("ingest", summary.as_dict())
         return summary
@@ -881,15 +916,54 @@ class Ingestor:
                 if not media_path.is_file() or sha256_file(media_path) != recording["sha256"]:
                     raise RuntimeError("recording media is absent or its sha256 differs")
                 event = build_communication_event(
-                    recording=recording, installation_id=installation_id, salesperson_id=self.salesperson_id
+                    recording=recording,
+                    installation_id=installation_id,
+                    salesperson_id=self.salesperson_identity.salesperson_id if self.salesperson_identity else None,
+                    salesperson_name=self.salesperson_identity.salesperson_name if self.salesperson_identity else None,
                 )
                 validate_event(event)
-                created = write_event_atomically(event_path(self.paths["events"], event), event, media_path, recording_path)
-                result["created" if created else "existing"] += 1
+                output_path = event_path(self.paths["events"], event)
+                if output_path.exists():
+                    existing = json.loads(output_path.read_text(encoding="utf-8"))
+                    validate_event(existing)
+                    if self.salesperson_identity is not None and (
+                        existing.get("salesperson_id") != self.salesperson_identity.salesperson_id
+                        or existing.get("salesperson_name") != self.salesperson_identity.salesperson_name
+                        or existing.get("salesperson_identity_status") != "CONFIGURED"
+                    ):
+                        # Preserve any prior CallLog enrichment while adding only explicit business identity.
+                        enriched_identity = {
+                            **existing,
+                            "salesperson_id": self.salesperson_identity.salesperson_id,
+                            "salesperson_name": self.salesperson_identity.salesperson_name,
+                            "salesperson_identity_status": "CONFIGURED",
+                        }
+                        validate_event(enriched_identity)
+                        replace_event_atomically(output_path, enriched_identity, media_path, recording_path)
+                    result["existing"] += 1
+                else:
+                    write_event_atomically(output_path, event, media_path, recording_path)
+                    result["created"] += 1
             except Exception as exc:
                 result["failures"] += 1
                 self._log("event_failure", {"reason": str(exc)[:300]})
         return result
+
+    def publish_cloud_handoff(self) -> CloudPublishSummary:
+        """Publish complete three-file packages without letting cloud delivery block phone ingest."""
+        self._reconcile_events()
+        publisher = CloudHandoffPublisher(
+            data_root=self.data_root,
+            ready_recordings=self.paths["ready"],
+            ready_events=self.paths["events"],
+            state=self.state,
+            identity=self.salesperson_identity,
+            cloud_handoff_root=resolve_cloud_handoff_root(),
+        )
+        summary = publisher.publish()
+        self.state.save()
+        self._log("cloud_handoff", summary.as_dict())
+        return summary
 
     def _recorded_timestamp(self, source: dict[str, Any]) -> tuple[str, str]:
         from .contract import recorded_time_from_evidence

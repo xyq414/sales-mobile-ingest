@@ -21,6 +21,7 @@ class StateStore:
                 "sources": {},
                 "devices": {},
                 "calllog_exports": {"sources": {}, "artifacts": {}, "rows": {}, "enrichments": {}},
+                "cloud_handoff": {"publications": {}, "salesperson_directories": {}},
             }
         try:
             loaded = json.loads(self.path.read_text(encoding="utf-8"))
@@ -33,6 +34,9 @@ class StateStore:
         calllog_exports.setdefault("artifacts", {})
         calllog_exports.setdefault("rows", {})
         calllog_exports.setdefault("enrichments", {})
+        cloud_handoff = loaded.setdefault("cloud_handoff", {})
+        cloud_handoff.setdefault("publications", {})
+        cloud_handoff.setdefault("salesperson_directories", {})
         return loaded
 
     def save(self) -> None:
@@ -139,3 +143,23 @@ class StateStore:
 
     def remember_calllog_enrichment(self, event_id: str, canonical_call_id: str) -> None:
         self.data["calllog_exports"]["enrichments"][event_id] = canonical_call_id
+
+    def cloud_publication(self, event_id: str) -> dict[str, Any] | None:
+        value = self.data["cloud_handoff"]["publications"].get(event_id)
+        return value if isinstance(value, dict) else None
+
+    def remember_cloud_publication(
+        self, event_id: str, *, relative_path: str | None, package_fingerprint: str | None, status: str
+    ) -> None:
+        self.data["cloud_handoff"]["publications"][event_id] = {
+            "relative_path": relative_path,
+            "package_fingerprint": package_fingerprint,
+            "status": status,
+        }
+
+    def salesperson_directory(self, salesperson_id: str) -> str | None:
+        value = self.data["cloud_handoff"]["salesperson_directories"].get(salesperson_id)
+        return value if isinstance(value, str) and value else None
+
+    def remember_salesperson_directory(self, salesperson_id: str, directory_name: str) -> None:
+        self.data["cloud_handoff"]["salesperson_directories"][salesperson_id] = directory_name

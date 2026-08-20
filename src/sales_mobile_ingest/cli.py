@@ -7,7 +7,17 @@ from pathlib import Path
 
 from .android_calllog_probe import summarize_private_result
 from .bridge import BridgeError
-from .config import ConfigError, resolve_data_root
+from .cloud_handoff import (
+    inspect_jianguoyun_environment,
+    validate_cloud_handoff_root,
+    validate_cloud_package,
+)
+from .config import (
+    ConfigError,
+    resolve_cloud_handoff_root,
+    resolve_data_root,
+    update_local_config,
+)
 from .service import Ingestor
 
 
@@ -38,6 +48,30 @@ def build_parser() -> argparse.ArgumentParser:
     calllog_summary.add_argument("--raw-result", required=True, type=Path, help="Gitignored app-private result copied locally")
     calllog_summary.add_argument("--event", required=True, type=Path, help="Existing local phone_call event JSON")
     calllog_summary.add_argument("--safe-output", required=True, type=Path, help="Gitignored safe summary output path")
+    configure_salesperson = subparsers.add_parser(
+        "configure-salesperson", help="Set the explicit local business salesperson identity used for formal cloud packages",
+    )
+    configure_salesperson.add_argument("--salesperson-id", required=True)
+    configure_salesperson.add_argument("--salesperson-name", required=True)
+    configure_salesperson.add_argument("--data-root", dest="command_data_root", help=argparse.SUPPRESS)
+    configure_handoff = subparsers.add_parser(
+        "configure-cloud-handoff", help="Set an explicitly chosen existing cloud client sync subdirectory",
+    )
+    configure_handoff.add_argument("--root", required=True, help="Existing absolute cloud handoff directory; never guessed")
+    configure_handoff.add_argument("--data-root", dest="command_data_root", help=argparse.SUPPRESS)
+    inspect_handoff = subparsers.add_parser(
+        "inspect-cloud-handoff", help="Read-only Nutstore client and sync-root candidate inspection",
+    )
+    inspect_handoff.add_argument("--data-root", dest="command_data_root", help=argparse.SUPPRESS)
+    publish_handoff = subparsers.add_parser(
+        "publish-cloud-handoff", help="Build and publish complete three-file cloud call packages",
+    )
+    publish_handoff.add_argument("--once", action="store_true", required=True)
+    publish_handoff.add_argument("--data-root", dest="command_data_root", help=argparse.SUPPRESS)
+    validate_package = subparsers.add_parser(
+        "validate-cloud-package", help="Validate one cloud call folder without reading phone or state data",
+    )
+    validate_package.add_argument("--package-dir", required=True, type=Path)
     ingest = subparsers.add_parser("ingest", help="Incrementally ingest call recordings")
     ingest.add_argument("--once", action="store_true", required=True, help="Run one bounded ingest pass")
     ingest.add_argument("--limit", type=int, help="Maximum source copy attempts for this one-shot pass")
@@ -85,6 +119,38 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "calllog-probe-summary":
             summary = summarize_private_result(args.raw_result, args.event, args.safe_output)
             print(json.dumps(summary, ensure_ascii=False, indent=2))
+            return 0
+        if args.command == "configure-salesperson":
+            salesperson_id = args.salesperson_id.strip()
+            salesperson_name = args.salesperson_name.strip()
+            if not salesperson_id or not salesperson_name:
+                raise ConfigError("salesperson_id and salesperson_name must both be non-empty")
+            update_local_config({"salesperson_id": salesperson_id, "salesperson_name": salesperson_name})
+            print(json.dumps({"status": "SALESPERSON_IDENTITY_CONFIGURED", "config_path": "config.local.json"}, ensure_ascii=False))
+            return 0
+        if args.command == "configure-cloud-handoff":
+            root = resolve_cloud_handoff_root(args.root)
+            if root is None:
+                raise ConfigError("cloud_handoff_root is required")
+            validated = validate_cloud_handoff_root(data_root, root)
+            update_local_config({"cloud_handoff_root": str(validated)})
+            print(json.dumps({"status": "CLOUD_HANDOFF_ROOT_CONFIGURED", "config_path": "config.local.json"}, ensure_ascii=False))
+            return 0
+        if args.command == "inspect-cloud-handoff":
+            print(json.dumps(inspect_jianguoyun_environment(resolve_cloud_handoff_root()), ensure_ascii=False, indent=2))
+            return 0
+        if args.command == "publish-cloud-handoff":
+            summary = ingestor.publish_cloud_handoff().as_dict()
+            print(json.dumps({"data_root": str(data_root), **summary}, ensure_ascii=False))
+            return 0
+        if args.command == "validate-cloud-package":
+            result = validate_cloud_package(args.package_dir)
+            print(json.dumps({
+                "status": "CLOUD_PACKAGE_VALID",
+                "event_id": result.event_id,
+                "recording_id": result.recording_id,
+                "media_filename": result.media_filename,
+            }, ensure_ascii=False))
             return 0
         interval = max(10, args.interval)
         while True:

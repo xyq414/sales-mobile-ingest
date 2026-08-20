@@ -1,12 +1,12 @@
 # sales-mobile-ingest
 
-Windows 本机将安卓电话录音以只读方式从 USB/MTP 采集到稳定的 `recording contract v1`，并自动发布供 Sales AI 消费的 `communication event contract v1`。第一版不做转写、AI、CRM、微信、云上传或任何手机端删除；原始音频保持原始字节和扩展名。
+Windows 本机将安卓电话录音以只读方式从 USB/MTP 采集到稳定的 `recording contract v1`，并自动发布供 Sales AI 消费的 `communication event contract v1`。完成销售身份和云端目录配置后，系统还会向坚果云客户端监控范围发布严格三文件的电话包。第一版不做转写、AI、CRM、微信、坚果云 API 调用或任何手机端删除；原始音频保持原始字节和扩展名。
 
 ## 三层边界
 
 1. **手机采集层**：`scripts/mtp_bridge.ps1` 使用 Windows Portable Device/Shell 访问手机。它不需要 ADB、开发者模式或手机盘符。
 2. **标准化层**：Python 先复制到 `inbox/recordings/.stage`，校验尺寸、计算 SHA-256、去重，再发布媒体和 JSON sidecar。
-3. **下游 contract**：录音 JSON 在 `ready/recordings` 最后出现；随后才在 `ready/events` 发布通信事件 JSON。事件出现时引用的媒体和录音 sidecar 均已经完整。下游无需理解 OPPO 路径、MTP 或 Windows 盘符。
+3. **本机事件与云端交付**：录音 JSON 在 `ready/recordings` 最后出现；随后才在 `ready/events` 发布通信事件 JSON。配置完成后，系统从这两个 canonical 对象构建独立的三文件云端电话包；下游无需理解 OPPO 路径、MTP 或 Windows 盘符。
 
 真实录音、客户数据、本机配置、状态和日志绝不进入 GitHub。详见 [contract/接口说明.md](contract/接口说明.md)。
 
@@ -48,6 +48,17 @@ python -m venv .venv
 
 # 增量解析已验证的公共 XML；只在唯一 HIGH_CONFIDENCE / EXACT 匹配时原子 enrich event
 .\.venv\Scripts\python.exe -m sales_mobile_ingest ingest-calllog-export --once
+
+# 只读检查坚果云客户端、已配置 root 与候选同步目录；多个候选时不会猜测
+.\.venv\Scripts\python.exe -m sales_mobile_ingest inspect-cloud-handoff
+
+# 一次性设置明确的业务销售身份和用户确认的坚果云同步子目录（均写入 gitignored config.local.json）
+.\.venv\Scripts\python.exe -m sales_mobile_ingest configure-salesperson --salesperson-id "S007" --salesperson-name "张三"
+.\.venv\Scripts\python.exe -m sales_mobile_ingest configure-cloud-handoff --root "<坚果云同步目录内的销售通话数据>"
+
+# 从当前 ready recording/event 构建并发布完整三文件电话包；watch 也会自动执行
+.\.venv\Scripts\python.exe -m sales_mobile_ingest publish-cloud-handoff --once
+.\.venv\Scripts\python.exe -m sales_mobile_ingest validate-cloud-package --package-dir "<一个电话文件夹>"
 
 # 一次增量采集
 .\.venv\Scripts\python.exe -m sales_mobile_ingest ingest --once --data-root "F:\CompanyData\SalesMobile"
@@ -91,6 +102,8 @@ diagnostics/calllog-backup/ # gitignored 的原始公共 XML、schema 与关联�
 参见 [docs/当前状态.md](docs/当前状态.md) 与 [docs/厂商适配矩阵.md](docs/厂商适配矩阵.md)。前者严格区分合成测试和本机真机验证；后者将 `REAL_DEVICE_VERIFIED`、`OFFICIAL_DOC_CANDIDATE`、`DOC_EVIDENCE_UNAVAILABLE` 与 generic heuristic 明确分开。
 
 下游事件语义见 [contract/通信事件接口说明.md](contract/通信事件接口说明.md)。可选的 `salesperson_id` 只能写入本机 gitignored `config.local.json`；未配置时事件明确为 `UNCONFIGURED`，程序绝不从 Windows 或 Git 身份猜测。
+
+正式云端消费者接口见 [docs/云端电话包接口.md](docs/云端电话包接口.md)：每通电话只有 `audio.<ext>`、`recording.json`、`event.json` 三个文件。`data_root` 的 state、日志、诊断和 XML 永不作为坚果云交付目录整体同步。
 
 当前真实 OPPO 样本的电话身份能力边界见 [docs/通话身份解析能力.md](docs/通话身份解析能力.md)。它明确区分“录音自身没有号码证据”与“普通 MTP/WPD 不公开通话记录”，不会把任意长数字或文件修改时间伪装成客户身份。
 

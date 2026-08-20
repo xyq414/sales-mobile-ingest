@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +13,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 class ConfigError(ValueError):
     """Raised when a local configuration cannot be safely used."""
+
+
+@dataclass(frozen=True)
+class SalespersonIdentity:
+    """Explicit business identity; it is never inferred from the workstation."""
+
+    salesperson_id: str
+    salesperson_name: str
 
 
 def local_config() -> dict[str, Any]:
@@ -25,6 +35,24 @@ def local_config() -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ConfigError("config.local.json must contain a JSON object")
     return data
+
+
+def update_local_config(updates: dict[str, Any]) -> None:
+    """Atomically update the ignored per-machine configuration."""
+    config_path = PROJECT_ROOT / "config.local.json"
+    data = local_config()
+    data.update(updates)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".config-", suffix=".json", dir=PROJECT_ROOT)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(data, handle, ensure_ascii=False, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_name, config_path)
+    finally:
+        if os.path.exists(temporary_name):
+            os.unlink(temporary_name)
 
 
 def resolve_data_root(cli_value: str | None = None) -> Path:
@@ -58,11 +86,38 @@ def ensure_layout(data_root: Path) -> dict[str, Path]:
     return paths
 
 
-def resolve_salesperson_id() -> str | None:
-    """Return an optional user-supplied identity; never infer it from Windows/Git."""
-    value = local_config().get("salesperson_id")
+def _configured_string(key: str) -> str | None:
+    value = local_config().get(key)
     if value is None:
         return None
     if not isinstance(value, str):
-        raise ConfigError("salesperson_id must be a string or null")
+        raise ConfigError(f"{key} must be a string or null")
     return value.strip() or None
+
+
+def resolve_salesperson_identity() -> SalespersonIdentity | None:
+    """Return a complete explicit business identity, or no identity at all."""
+    salesperson_id = _configured_string("salesperson_id")
+    salesperson_name = _configured_string("salesperson_name")
+    if salesperson_id is None and salesperson_name is None:
+        return None
+    if salesperson_id is None or salesperson_name is None:
+        return None
+    return SalespersonIdentity(salesperson_id=salesperson_id, salesperson_name=salesperson_name)
+
+
+def resolve_salesperson_id() -> str | None:
+    """Compatibility accessor for callers that only need the stable business ID."""
+    identity = resolve_salesperson_identity()
+    return identity.salesperson_id if identity else None
+
+
+def resolve_cloud_handoff_root(cli_value: str | None = None) -> Path | None:
+    """Return the explicitly configured cloud handoff root; discovery never guesses one."""
+    configured = cli_value or os.getenv("SALES_MOBILE_INGEST_CLOUD_HANDOFF_ROOT") or _configured_string("cloud_handoff_root")
+    if not configured:
+        return None
+    root = Path(os.path.expandvars(configured)).expanduser()
+    if not root.is_absolute():
+        root = (PROJECT_ROOT / root).resolve()
+    return root

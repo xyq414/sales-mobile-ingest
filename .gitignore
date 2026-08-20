@@ -22,6 +22,9 @@ logs/
 diagnostics/
 *.xml
 SalesMobileIngestData/
+cloud-handoff/
+cloud_handoff/
+销售通话数据/
 
 # Local configuration and secrets
 .env

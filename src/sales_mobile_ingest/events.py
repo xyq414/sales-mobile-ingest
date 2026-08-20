@@ -56,7 +56,8 @@ def _occurred_provenance(recording: dict[str, Any]) -> tuple[str, str]:
 
 
 def build_communication_event(
-    *, recording: dict[str, Any], installation_id: str, salesperson_id: str | None
+    *, recording: dict[str, Any], installation_id: str, salesperson_id: str | None,
+    salesperson_name: str | None = None,
 ) -> dict[str, Any]:
     recording_id = recording.get("recording_id")
     if not isinstance(recording_id, str):
@@ -73,6 +74,7 @@ def build_communication_event(
     phone_confidence = recording.get("phone_number_confidence") if recording.get("phone_number_confidence") in {
         "high", "medium", "low"
     } else "unknown"
+    configured_identity = bool(salesperson_id and salesperson_id.strip() and salesperson_name and salesperson_name.strip())
     return {
         "schema_version": "communication-event/v1",
         "event_id": event_id,
@@ -81,8 +83,9 @@ def build_communication_event(
         "occurred_at": recording.get("recorded_at"),
         "occurred_at_source": occurred_source,
         "occurred_at_confidence": occurred_confidence,
-        "salesperson_id": salesperson_id,
-        "salesperson_identity_status": "CONFIGURED" if salesperson_id else "UNCONFIGURED",
+        "salesperson_id": salesperson_id.strip() if configured_identity else None,
+        "salesperson_name": salesperson_name.strip() if configured_identity else None,
+        "salesperson_identity_status": "CONFIGURED" if configured_identity else "UNCONFIGURED",
         "installation_id": installation_id,
         "device_vendor": recording.get("device_vendor"),
         "device_model": recording.get("device_model"),
