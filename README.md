@@ -11,7 +11,22 @@ Windows 本机以只读 USB/MTP 采集 Android CallLog 公共导出与可选电�
 
 真实录音、客户数据、本机配置、状态和日志绝不进入 GitHub。详见 [contract/接口说明.md](contract/接口说明.md)。
 
-## 安装与运行
+## Windows Pilot 正式入口
+
+普通销售使用的是发布包中的 `SalesMobileIngest.exe`，不需要 repository、Python、Codex、PowerShell 或 JSON 配置：
+
+1. 解压 `SalesMobileIngest-Pilot-win64.zip`，双击 `SalesMobileIngest.exe`。
+2. 解锁手机并在 USB 选项中选择“文件传输 / MTP”；首页会自动检查，也可点“重新检查”。
+3. 新手机第一次在向导中填写销售编号/姓名，并明确选择历史归属边界。
+4. 第一次确认坚果云客户端中已经同步的根目录；程序创建独立“销售通话数据”子目录。
+5. 如首页提示 CallLog 未准备好，只需在手机 `SMS Backup & Restore` 立即备份 `Call logs` 到公共存储，再回到 UI 检查。
+6. 首页显示“可以导入”或“可以导入，但有提醒”后，点“一键导入到坚果云”。
+
+桌面程序始终先保留 local canonical state，再写入已确认的坚果云同步目录。UI 只会声称“已写入坚果云同步目录”，不会把本机落盘冒充成远端同步成功。定时备份“已观察到后续更新”也只来自跨时间的公共 snapshot 证据；程序无法读取或认证 App 内部全部设置。
+
+发布、状态语义和首次使用说明见 [docs/Windows桌面Pilot.md](docs/Windows桌面Pilot.md)。当前 packaged UI 已完成 synthetic/no-phone smoke；尚未用本 UI 对真实 OPPO 执行一键导入，因此物理 UI 验收仍为 `NOT_RUN`。
+
+## 开发者安装与 CLI
 
 在项目根目录 PowerShell 中：
 
@@ -30,7 +45,7 @@ python -m venv .venv
 3. 环境变量 `SALES_MOBILE_INGEST_DATA_ROOT`
 4. 当前 Windows 用户的 `Documents\SalesMobileIngestData`
 
-复制 `config.example.json` 为 `config.local.json` 后可修改默认根目录；`config.local.json` 被 Git 忽略。业务代码没有 `C:`、`D:` 或 `E:` 的前提。
+源码 CLI 仍兼容项目内 gitignored `config.local.json`。桌面程序使用 `%LOCALAPPDATA%\SalesMobileIngest\config.json`，首次源码 GUI 启动可非破坏地复制既有 legacy config；用户不需编辑任何配置文件。业务代码没有 `C:`、`D:` 或 `E:` 的前提。
 
 常用命令：
 
@@ -110,6 +125,7 @@ logs/                      # 隐私最小化运行日志
 diagnostics/probe-reports/ # gitignored 的脱敏本机诊断
 diagnostics/calllog-backup/ # gitignored 的原始公共 XML、schema 与关联摘要
 diagnostics/migrations/    # legacy migration 私有备份/evidence
+diagnostics/desktop/       # UI 生成的隐私最小化诊断
 ```
 
 ## 真实状态

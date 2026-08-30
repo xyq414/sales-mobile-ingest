@@ -30,6 +30,16 @@ Run `python -m pytest`. The suite contains the following deterministic Golden Ca
 
 Also covered: schema examples, state backup, atomic publication, source/artifact dedupe, cloud conflicts, event enrichment, privacy-minimal summaries, CLI parser smoke, watcher single-cycle synthetic execution and drive-independent roots。
 
+## Desktop Pilot automated matrix
+
+Desktop tests inject a fake backend and separately exercise the real `Ingestor` preflight adapter. They cover no phone, unknown/known device, assignment boundaries, CallLog directory missing/no XML/FRESH/STALE/UNKNOWN/MALFORMED/count mismatch, scheduled evidence history, optional recording states, missing/invalid/confirmed cloud root, orchestration order, double-run exclusion, human error translation, privacy filtering, persistent config and packaged resource resolution。
+
+`test_desktop_ui.py` creates a real Qt application with the offscreen Windows platform, renders the five home cards, drives button state, opens the first-run wizard/settings dialog, captures a window image and closes cleanly. This is a GUI smoke, not just an import check。
+
+`scripts/build-desktop-release.ps1` builds the windowed PyInstaller one-folder release, copies it to a clean temporary directory outside the repository, launches the EXE twice with no system Python, runs actual no-phone preflight through the bundled MTP bridge, verifies schemas/resources, renders the UI, and proves the same user-writable config persists across launches。报告和 release 均不进入 Git。
+
 ## Physical acceptance
 
 `probe` remains read-only and must not assume a drive letter. A physical device passes only after real MTP discovery, source-byte invariance, copy/size/hash, duplicate ingest and its provider-specific checks complete. Absence of a connected phone is `NOT_RUN`, not automated failure. Redmi Note 12 5G and Redmi Note 15 use the separate runbook in `docs/手机初始化与Redmi物理验收.md`; synthetic fixtures can never set `REAL_DEVICE_VERIFIED`。
+
+The next OPPO Pilot acceptance starts from the packaged `SalesMobileIngest.exe`, not from source commands. Until that one-click physical run passes, its desktop evidence is `NOT_RUN` even though prior OPPO backend/MTP evidence remains valid。

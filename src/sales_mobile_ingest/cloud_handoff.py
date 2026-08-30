@@ -19,12 +19,12 @@ from jsonschema import Draft202012Validator, FormatChecker
 from .config import ConfigError, SalespersonIdentity
 from .contract import sha256_file, validate_recording
 from .events import validate_event
+from .resources import resource_path
 from .state import StateStore
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-CLOUD_RECORDING_SCHEMA_PATH = PROJECT_ROOT / "contract" / "cloud_recording_package.schema.json"
-CLOUD_EVENT_SCHEMA_PATH = PROJECT_ROOT / "contract" / "cloud_communication_event_package.schema.json"
+CLOUD_RECORDING_SCHEMA_PATH = resource_path("contract", "cloud_recording_package.schema.json")
+CLOUD_EVENT_SCHEMA_PATH = resource_path("contract", "cloud_communication_event_package.schema.json")
 _WINDOWS_FORBIDDEN = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _WINDOWS_RESERVED = {
     "CON", "PRN", "AUX", "NUL", *(f"COM{number}" for number in range(1, 10)), *(f"LPT{number}" for number in range(1, 10)),

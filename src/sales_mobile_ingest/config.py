@@ -8,8 +8,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .resources import SOURCE_PROJECT_ROOT, is_packaged
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = SOURCE_PROJECT_ROOT
+CONFIG_PATH_ENV = "SALES_MOBILE_INGEST_CONFIG_PATH"
 
 
 class ConfigError(ValueError):
@@ -24,26 +26,50 @@ class SalespersonIdentity:
     salesperson_name: str
 
 
+def desktop_config_path() -> Path:
+    """Return a stable per-user location that survives moving or updating the EXE."""
+    local_app_data = os.getenv("LOCALAPPDATA")
+    base = Path(local_app_data).expanduser() if local_app_data else Path.home() / "AppData" / "Local"
+    return base / "SalesMobileIngest" / "config.json"
+
+
+def active_config_path() -> Path:
+    explicit = os.getenv(CONFIG_PATH_ENV)
+    if explicit:
+        return Path(os.path.expandvars(explicit)).expanduser().resolve()
+    if is_packaged():
+        return desktop_config_path()
+    return PROJECT_ROOT / "config.local.json"
+
+
+def use_desktop_config() -> Path:
+    """Select the desktop config for this process, including source-mode GUI runs."""
+    path = desktop_config_path()
+    os.environ.setdefault(CONFIG_PATH_ENV, str(path))
+    return active_config_path()
+
+
 def local_config() -> dict[str, Any]:
-    """Read the ignored per-machine configuration without exposing it to Git."""
-    config_path = PROJECT_ROOT / "config.local.json"
+    """Read the ignored per-machine or per-user configuration."""
+    config_path = active_config_path()
     if not config_path.exists():
         return {}
     try:
         data = json.loads(config_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
-        raise ConfigError(f"Invalid config.local.json: {exc.msg}") from exc
+        raise ConfigError(f"Invalid local configuration: {exc.msg}") from exc
     if not isinstance(data, dict):
-        raise ConfigError("config.local.json must contain a JSON object")
+        raise ConfigError("local configuration must contain a JSON object")
     return data
 
 
 def update_local_config(updates: dict[str, Any]) -> None:
     """Atomically update the ignored per-machine configuration."""
-    config_path = PROJECT_ROOT / "config.local.json"
+    config_path = active_config_path()
+    config_path.parent.mkdir(parents=True, exist_ok=True)
     data = local_config()
     data.update(updates)
-    descriptor, temporary_name = tempfile.mkstemp(prefix=".config-", suffix=".json", dir=PROJECT_ROOT)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".config-", suffix=".json", dir=config_path.parent)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
             json.dump(data, handle, ensure_ascii=False, indent=2, sort_keys=True)
@@ -68,18 +94,50 @@ def backup_legacy_config_for_migration(destination_dir: Path) -> Path | None:
     return destination
 
 
+def migrate_legacy_config_to_desktop() -> bool:
+    """Copy legacy settings once; the repository-local file remains untouched."""
+    destination = desktop_config_path()
+    legacy = PROJECT_ROOT / "config.local.json"
+    if destination.exists() or not legacy.is_file() or destination.resolve() == legacy.resolve():
+        return False
+    try:
+        data = json.loads(legacy.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ConfigError("legacy config.local.json cannot be migrated safely") from exc
+    if not isinstance(data, dict):
+        raise ConfigError("legacy config.local.json must contain a JSON object")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".config-migration-", suffix=".json", dir=destination.parent
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(data, handle, ensure_ascii=False, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_name, destination)
+    finally:
+        if os.path.exists(temporary_name):
+            os.unlink(temporary_name)
+    return True
+
+
 def resolve_data_root(cli_value: str | None = None) -> Path:
     """Return a user-configurable data root without encoding a drive letter."""
     configured: str | None = cli_value
+    relative_base = PROJECT_ROOT
     if not configured:
         configured = local_config().get("data_root")
+        relative_base = _config_relative_base()
     if not configured:
         configured = os.getenv("SALES_MOBILE_INGEST_DATA_ROOT")
+        relative_base = PROJECT_ROOT
     if not configured:
         configured = str(Path.home() / "Documents" / "SalesMobileIngestData")
     root = Path(os.path.expandvars(configured)).expanduser()
     if not root.is_absolute():
-        root = (PROJECT_ROOT / root).resolve()
+        root = (relative_base / root).resolve()
     return root
 
 
@@ -132,13 +190,23 @@ def resolve_salesperson_id() -> str | None:
 
 def resolve_cloud_handoff_root(cli_value: str | None = None) -> Path | None:
     """Return the explicitly configured cloud handoff root; discovery never guesses one."""
-    configured = cli_value or os.getenv("SALES_MOBILE_INGEST_CLOUD_HANDOFF_ROOT") or _configured_string("cloud_handoff_root")
+    configured = cli_value or os.getenv("SALES_MOBILE_INGEST_CLOUD_HANDOFF_ROOT")
+    relative_base = PROJECT_ROOT
+    if not configured:
+        configured = _configured_string("cloud_handoff_root")
+        relative_base = _config_relative_base()
     if not configured:
         return None
     root = Path(os.path.expandvars(configured)).expanduser()
     if not root.is_absolute():
-        root = (PROJECT_ROOT / root).resolve()
+        root = (relative_base / root).resolve()
     return root
+
+
+def _config_relative_base() -> Path:
+    config_path = active_config_path().resolve()
+    legacy = (PROJECT_ROOT / "config.local.json").resolve()
+    return PROJECT_ROOT if config_path == legacy else config_path.parent
 
 
 def resolve_calllog_freshness_seconds() -> int:

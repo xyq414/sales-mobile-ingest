@@ -11,10 +11,10 @@ from typing import Any
 from jsonschema import Draft202012Validator, FormatChecker
 
 from .adapters import profile_for_adapter
+from .resources import resource_path
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-SCHEMA_PATH = PROJECT_ROOT / "contract" / "communication_event.schema.json"
+SCHEMA_PATH = resource_path("contract", "communication_event.schema.json")
 _PHONE_STRIP = re.compile(r"[\s()\-./]+")
 
 

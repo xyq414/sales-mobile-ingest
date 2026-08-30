@@ -444,7 +444,7 @@ def test_gc_state_v1_migration_is_atomic_backed_up_and_stable_after_reload(tmp_p
     }
     (state_dir / "ingest-state.json").write_text(json.dumps(original), encoding="utf-8")
     first = StateStore(state_dir)
-    assert first.data["version"] == 2
+    assert first.data["version"] == StateStore.CURRENT_VERSION
     assert first.migration_backup_path is not None and first.migration_backup_path.is_file()
     first.save()
     second = StateStore(state_dir)

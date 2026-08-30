@@ -11,11 +11,11 @@ from jsonschema import Draft202012Validator, FormatChecker
 
 from .contract import iso_now
 from .events import normalise_phone_number
+from .resources import resource_path
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-PHONE_CALL_SCHEMA_PATH = PROJECT_ROOT / "contract" / "phone_call.schema.json"
-LINK_SCHEMA_PATH = PROJECT_ROOT / "contract" / "call_recording_link.schema.json"
+PHONE_CALL_SCHEMA_PATH = resource_path("contract", "phone_call.schema.json")
+LINK_SCHEMA_PATH = resource_path("contract", "call_recording_link.schema.json")
 
 
 class PhoneCallValidationError(ValueError):

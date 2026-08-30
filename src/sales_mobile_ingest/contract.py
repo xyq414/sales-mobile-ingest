@@ -9,9 +9,9 @@ from typing import Any
 
 from jsonschema import Draft202012Validator, FormatChecker
 
+from .resources import resource_path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-SCHEMA_PATH = PROJECT_ROOT / "contract" / "recording.schema.json"
+SCHEMA_PATH = resource_path("contract", "recording.schema.json")
 _FILENAME_TIME = re.compile(r"(?<!\d)((?:19|20)\d{2})[-_]?([01]\d)[-_]?([0-3]\d)[ _-]([0-2]\d)[-_]?([0-5]\d)[-_]?([0-5]\d)(?!\d)")
 
 

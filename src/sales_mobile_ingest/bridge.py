@@ -7,9 +7,9 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from .resources import resource_path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-BRIDGE_SCRIPT = PROJECT_ROOT / "scripts" / "mtp_bridge.ps1"
+BRIDGE_SCRIPT = resource_path("scripts", "mtp_bridge.ps1")
 
 
 class BridgeError(RuntimeError):
@@ -19,8 +19,8 @@ class BridgeError(RuntimeError):
 class MtpBridge:
     """Windows Shell bridge. It never requests ADB and only invokes MTP reads/copies."""
 
-    def __init__(self, script_path: Path = BRIDGE_SCRIPT) -> None:
-        self.script_path = script_path
+    def __init__(self, script_path: Path | None = None) -> None:
+        self.script_path = script_path or BRIDGE_SCRIPT
 
     def probe(self, cached_dirs: list[dict[str, str]] | None = None, search_depth: int = 3) -> dict[str, Any]:
         return self._run({

@@ -8,7 +8,7 @@ import shutil
 import tempfile
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -189,6 +189,40 @@ class CallLogExportSummary:
         }
 
 
+@dataclass
+class CallLogPreflightSummary:
+    status: str = "MISSING_DIRECTORY"
+    directories_scanned: int = 0
+    xml_candidates: int = 0
+    parsed_rows: int = 0
+    root_count: int | None = None
+    backup_timestamp: str | None = None
+    freshness: str = "UNKNOWN"
+    parse_status: str = "NOT_RUN"
+    device_id: str | None = None
+    earliest_call_at: str | None = None
+    estimated_new_calls: int | None = None
+    scheduled_backup_evidence: str = "UNVERIFIED"
+    failures: int = 0
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "directories_scanned": self.directories_scanned,
+            "xml_candidates": self.xml_candidates,
+            "parsed_rows": self.parsed_rows,
+            "root_count": self.root_count,
+            "backup_timestamp": self.backup_timestamp,
+            "freshness": self.freshness,
+            "parse_status": self.parse_status,
+            "device_id": self.device_id,
+            "earliest_call_at": self.earliest_call_at,
+            "estimated_new_calls": self.estimated_new_calls,
+            "scheduled_backup_evidence": self.scheduled_backup_evidence,
+            "failures": self.failures,
+        }
+
+
 class Ingestor:
     def __init__(
         self,
@@ -210,6 +244,49 @@ class Ingestor:
     def probe(self) -> dict[str, Any]:
         raw = self.bridge.probe(self.state.known_dirs())
         return self._probe_from_raw(raw)
+
+    def discover_devices_for_desktop(self) -> list[dict[str, Any]]:
+        """Observe connected devices and return only UI-safe facts plus an opaque local ID."""
+        raw = self.bridge.probe(self.state.known_dirs())
+        devices: list[dict[str, Any]] = []
+        for device in raw.get("devices", []):
+            alias = str(device.get("device_key") or "")
+            if not alias:
+                continue
+            display_name = str(device.get("display_name") or "") or None
+            vendor, model = device_identity(display_name)
+            device_id = self.device_registry.observe(
+                observed_alias=alias,
+                display_name=display_name,
+                vendor=vendor,
+                model=model,
+            )
+            attribution = self.device_registry.attribution(device_id=device_id, occurred_at=iso_now())
+            accepted_directories = 0
+            recording_files = 0
+            for candidate in device.get("candidates", []):
+                decision = classify_candidate(
+                    device_name=display_name,
+                    relative_path=str(candidate.get("relative_path") or ""),
+                    files=candidate.get("files", []),
+                )
+                if decision.accepted:
+                    accepted_directories += 1
+                    recording_files += len(candidate.get("files", []))
+            devices.append({
+                "device_id": device_id,
+                "display_name": display_name,
+                "vendor": vendor,
+                "model": model,
+                "mtp_usable": bool(device.get("storage_roots")),
+                "salesperson_id": attribution.get("salesperson_id"),
+                "salesperson_name": attribution.get("salesperson_name"),
+                "assignment_status": attribution["salesperson_attribution_status"],
+                "recording_directory_found": accepted_directories > 0,
+                "recording_file_count": recording_files,
+            })
+        self.state.save()
+        return devices
 
     def _probe_from_raw(self, raw: dict[str, Any]) -> dict[str, Any]:
         result: list[dict[str, Any]] = []
@@ -340,6 +417,111 @@ class Ingestor:
         self.state.save()
         self._log("calllog_export_inspection", summary.as_dict())
         return summary
+
+    def preflight_calllog_exports(self, *, observed_at: str | None = None) -> CallLogPreflightSummary:
+        """Validate the latest public CallLog snapshot without publishing canonical calls."""
+        observed_at = observed_at or iso_now()
+        sources, _, directory_count = self._discover_calllog_export_sources()
+        summary = CallLogPreflightSummary(
+            directories_scanned=directory_count,
+            xml_candidates=len(sources),
+        )
+        if directory_count == 0:
+            return summary
+        if not sources:
+            summary.status = "NO_XML"
+            return summary
+
+        inspected: list[tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]] = []
+        failed_modified: list[datetime] = []
+        failure_without_timestamp = False
+        for provider, source in sources:
+            try:
+                _, artifact_sha256, artifact_path, _ = self._stage_calllog_export(source)
+                rows = provider.parse(artifact_path, artifact_sha256)
+                snapshot = synctech_snapshot_metadata(
+                    artifact_path,
+                    artifact_sha256=artifact_sha256,
+                    imported_at=observed_at,
+                    stale_after_seconds=resolve_calllog_freshness_seconds(),
+                    device_id=source["device_id"],
+                )
+                snapshot["device_id"] = source["device_id"]
+                if snapshot.get("root_count") is not None and snapshot["root_count"] != len(rows):
+                    snapshot["parse_status"] = "COUNT_MISMATCH"
+                    snapshot["freshness"] = "UNKNOWN"
+                inspected.append((source, snapshot, rows))
+            except CallLogExportError as exc:
+                summary.failures += 1
+                self._remember_calllog_failure(provider, source, exc)
+                modified = self._optional_timestamp(source.get("modified_at"))
+                if modified is not None:
+                    failed_modified.append(modified)
+                else:
+                    failure_without_timestamp = True
+            except Exception:
+                summary.failures += 1
+                failure_without_timestamp = True
+
+        if not inspected:
+            summary.status = "MALFORMED"
+            summary.parse_status = "MALFORMED"
+            self.state.save()
+            return summary
+
+        source, snapshot, rows = max(inspected, key=self._preflight_snapshot_sort_key)
+        selected_modified = self._optional_timestamp(source.get("modified_at"))
+        if failure_without_timestamp or (
+            selected_modified is not None and any(value > selected_modified for value in failed_modified)
+        ):
+            summary.status = "MALFORMED"
+            summary.parse_status = "MALFORMED"
+            self.state.save()
+            return summary
+
+        self.state.remember_calllog_snapshot(snapshot)
+        schedule_evidence = self.state.observe_calllog_snapshot(
+            device_id=str(source["device_id"]), snapshot=snapshot, observed_at=observed_at
+        )
+        existing_ids = {
+            str(row.get("canonical_call_id"))
+            for row in self.state.calllog_rows_for_device_id(str(source["device_id"]))
+        }
+        current_ids = {str(row["canonical_call_id"]) for row in rows}
+        summary.status = str(snapshot["freshness"])
+        if snapshot["parse_status"] == "COUNT_MISMATCH":
+            summary.status = "COUNT_MISMATCH"
+        summary.parsed_rows = len(rows)
+        summary.root_count = snapshot.get("root_count")
+        summary.backup_timestamp = snapshot.get("backup_timestamp")
+        summary.freshness = str(snapshot["freshness"])
+        summary.parse_status = str(snapshot["parse_status"])
+        summary.device_id = str(source["device_id"])
+        summary.earliest_call_at = min((str(row["occurred_at"]) for row in rows), default=None)
+        summary.estimated_new_calls = len(current_ids - existing_ids)
+        summary.scheduled_backup_evidence = schedule_evidence
+        self.state.save()
+        return summary
+
+    @staticmethod
+    def _optional_timestamp(value: Any) -> datetime | None:
+        if not isinstance(value, str) or not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo is not None else None
+
+    @classmethod
+    def _preflight_snapshot_sort_key(
+        cls, value: tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]
+    ) -> tuple[datetime, datetime, str]:
+        source, snapshot, _ = value
+        minimum = datetime.min.replace(tzinfo=timezone.utc)
+        backup = cls._optional_timestamp(snapshot.get("backup_timestamp")) or minimum
+        modified = cls._optional_timestamp(source.get("modified_at")) or minimum
+        return backup, modified, str(snapshot["snapshot_id"])
 
     def ingest_calllog_exports(self) -> CallLogExportSummary:
         """Persist canonical rows from registered export providers, then enrich only unique matches."""
@@ -897,10 +1079,30 @@ class Ingestor:
             "datetime_token_start": datetime_match.start() if datetime_match else None,
         }
 
-    def ingest_once(self, limit: int | None = None) -> IngestSummary:
+    def ingest_once(
+        self, limit: int | None = None, progress: Callable[[str], None] | None = None
+    ) -> IngestSummary:
         if limit is not None and limit < 1:
             raise ValueError("limit must be at least 1")
         summary = IngestSummary()
+        if progress:
+            progress("正在读取通话记录…")
+        try:
+            calllog_summary = self.ingest_calllog_exports()
+            summary.calllog_xml_candidates += calllog_summary.xml_candidates
+            summary.calllog_new_artifacts += calllog_summary.new_artifacts
+            summary.calllog_canonical_rows_new += calllog_summary.canonical_rows_new
+            summary.calllog_events_enriched += calllog_summary.events_enriched
+            summary.phone_calls_created += calllog_summary.phone_calls_created
+            summary.phone_calls_existing += calllog_summary.phone_calls_existing
+            summary.calllog_snapshot_status = calllog_summary.snapshot_status
+        except Exception as exc:
+            # The CLI retains its historical recording-only resilience. Desktop preflight
+            # separately blocks a formal run when CallLog evidence is not safe.
+            summary.calllog_failures += 1
+            self._log("calllog_export_failure", {"reason": str(exc)[:300]})
+        if progress:
+            progress("正在导入新增录音…")
         stop_requested = False
         raw = self.bridge.probe(self.state.known_dirs())
         devices = raw.get("devices", [])
@@ -994,19 +1196,15 @@ class Ingestor:
         summary.events_created += event_summary["created"]
         summary.events_existing += event_summary["existing"]
         summary.event_failures += event_summary["failures"]
-        try:
-            calllog_summary = self.ingest_calllog_exports()
-            summary.calllog_xml_candidates += calllog_summary.xml_candidates
-            summary.calllog_new_artifacts += calllog_summary.new_artifacts
-            summary.calllog_canonical_rows_new += calllog_summary.canonical_rows_new
-            summary.calllog_events_enriched += calllog_summary.events_enriched
-            summary.phone_calls_created += calllog_summary.phone_calls_created
-            summary.phone_calls_existing += calllog_summary.phone_calls_existing
-            summary.calllog_snapshot_status = calllog_summary.snapshot_status
-        except Exception as exc:
-            # Call-log export is optional enrichment. It must not block a sound recording import.
-            summary.calllog_failures += 1
-            self._log("calllog_export_failure", {"reason": str(exc)[:300]})
+        if progress:
+            progress("正在关联电话与录音…")
+        correlation = self._reconcile_calllog_events()
+        summary.calllog_events_enriched += correlation["events_enriched"]
+        if progress:
+            progress("正在去重…")
+        self.state.save()
+        if progress:
+            progress("正在写入坚果云交付目录…")
         try:
             call_fact_summary = self.publish_call_facts()
             summary.call_fact_handoff_status = call_fact_summary.status
@@ -1032,6 +1230,8 @@ class Ingestor:
             summary.cloud_handoff_status = "CLOUD_HANDOFF_FAILURE"
             summary.cloud_packages_failures += 1
             self._log("cloud_handoff_failure", {"reason": str(exc)[:300]})
+        if progress:
+            progress("正在验证…")
         self.state.save()
         self._log("ingest", summary.as_dict())
         return summary
@@ -1300,6 +1500,38 @@ class Ingestor:
             self.state.remember_phone_call(updated)
             changed += 1
         return changed
+
+    def desktop_business_snapshot(self) -> dict[str, Any]:
+        """Return identifiers and link states for before/after counting inside one local run."""
+        calls = {path.stem for path in self.paths["calls"].glob("pc_*.json")}
+        recordings: set[str] = set()
+        for path in self.paths["ready"].glob("*.json"):
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+                validate_recording(value)
+                recordings.add(str(value["recording_id"]))
+            except Exception:
+                continue
+        links: dict[str, dict[str, Any]] = {}
+        for path in self.paths["call_links"].glob("lnk_*.json"):
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            recording_id = value.get("recording_id")
+            if isinstance(recording_id, str):
+                links[recording_id] = {
+                    "status": value.get("status"),
+                    "call_id": value.get("call_id"),
+                }
+        return {"calls": calls, "recordings": recordings, "links": links}
+
+    def remember_desktop_import_run(self, summary: dict[str, Any]) -> None:
+        self.state.remember_desktop_import_run(summary)
+        self.state.save()
+
+    def latest_desktop_import_run(self) -> dict[str, Any] | None:
+        return self.state.latest_desktop_import_run()
 
     def _observe_recording_source(self, source: dict[str, Any]) -> str | None:
         alias = str(source.get("device_key") or "")

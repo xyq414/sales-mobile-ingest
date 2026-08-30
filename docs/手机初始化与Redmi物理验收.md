@@ -1,6 +1,6 @@
 # 手机一次性初始化与 Redmi 物理验收
 
-状态：2026-08-30 runbook ready；Redmi Note 12 5G / Redmi Note 15 均 `PHYSICAL_DEVICE_PENDING`。本文是未来真机输入，不是已执行证据。
+状态：2026-08-31 runbook ready；Redmi Note 12 5G / Redmi Note 15 均 `PHYSICAL_DEVICE_PENDING`。本文是未来真机输入，不是已执行证据。
 
 ## 一次性手机初始化 contract
 
@@ -13,8 +13,20 @@
 5. 手动创建一次 CallLog-only XML，确认 root/row schema 后再配置 recurring schedule。
 6. 配置业务允许的 recurring interval。Android 13+ 若真实 UI 要求 alarms/reminders 权限，显式授予并记录；不得仅凭文档声称计划已运行。
 7. Xiaomi/HyperOS 如真实 UI 提供 autostart、后台运行或电池策略，将该 App 设为允许自启动/不受限，并记录实际菜单路径和 OS build。菜单不存在时记录 NOT_PRESENT，不猜测。
-8. 正常日常路径应为：销售正常使用 → App scheduled export → 解锁手机 → USB 选择文件传输/MTP → Windows watcher 只读 ingest。项目不删除、移动、改名、回写手机文件。
-9. Windows 执行 `list-devices --discover`，使用返回的 local `device_id` 显式创建 effective-dated assignment；不得编辑 config/state JSON，也不得按电脑当前用户猜销售。
+8. 当前 Desktop Pilot 的正常日常路径应为：销售正常使用 → App scheduled export → 解锁手机 → USB 选择文件传输/MTP → 双击“销售手机导入” → 一键导入。V1 不后台常驻、不插线自动导入。项目不删除、移动、改名、回写手机文件。
+9. 新手机在桌面首次向导中填写销售编号/姓名，并明确“当前可见历史都属于该销售”或指定归属开始时间。底层仍保存 effective-dated assignment；不得编辑 config/state JSON，也不得按电脑当前用户猜销售。
+
+## OPPO Desktop Pilot 下一步物理验收
+
+既有 OPPO A6 Pro 5G backend/MTP/录音/SyncTech XML 证据保留为 `REAL_DEVICE_VERIFIED`，但 packaged UI 一键导入尚未执行。下一次只需从正式 release 做以下人工验收，不从源码命令开始：
+
+1. 解压并双击 `SalesMobileIngest.exe`；手机未连时首页应清楚显示 blocker，不崩溃。
+2. 解锁 OPPO、选择文件传输/MTP；确认首页只显示型号/销售业务信息，不显示 alias、serial、device ID 或号码。
+3. 第一次完成销售绑定和坚果云目录确认；历史边界必须由用户明确选择。
+4. 如需要，在手机立即生成 Call logs backup；UI 重新检查后正确显示 freshness，schedule 仍只按真实历史证据表达。
+5. 点“一键导入到坚果云”，核对 PhoneCall-first、可选录音、link、去重、local canonical 与同步目录 handoff 结果。
+6. 第二次点击后 canonical 对象数不增长；成功措辞只能是“已写入坚果云同步目录”。
+7. 核对手机端源文件未删除、移动、改名或改写。各项记录 PASS/FAIL/NOT_RUN，隐私数据不进入 Git。
 
 ## 每台 Redmi 的 bounded physical Golden Case
 

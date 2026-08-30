@@ -11,7 +11,7 @@ from typing import Any
 
 
 class StateStore:
-    CURRENT_VERSION = 2
+    CURRENT_VERSION = 3
 
     def __init__(self, state_dir: Path) -> None:
         self.path = state_dir / "ingest-state.json"
@@ -33,6 +33,7 @@ class StateStore:
                 "calllog_snapshots": {},
                 "call_fact_handoff": {"publications": {}},
                 "device_registry": {"devices": {}, "alias_index": {}, "assignments": {}, "migration": {}},
+                "desktop": {"calllog_observations": {}, "import_runs": []},
             }
         try:
             loaded = json.loads(self.path.read_text(encoding="utf-8"))
@@ -61,6 +62,9 @@ class StateStore:
         for key in ("devices", "alias_index", "assignments", "migration"):
             registry.setdefault(key, {})
         loaded.setdefault("call_fact_handoff", {}).setdefault("publications", {})
+        desktop = loaded.setdefault("desktop", {})
+        desktop.setdefault("calllog_observations", {})
+        desktop.setdefault("import_runs", [])
         loaded["version"] = self.CURRENT_VERSION
         if version < self.CURRENT_VERSION:
             loaded.setdefault("state_migrations", []).append({
@@ -187,6 +191,59 @@ class StateStore:
 
     def remember_calllog_snapshot(self, snapshot: dict[str, Any]) -> None:
         self.data["calllog_snapshots"][snapshot["snapshot_id"]] = snapshot
+
+    def observe_calllog_snapshot(
+        self, *, device_id: str, snapshot: dict[str, Any], observed_at: str, minimum_interval_seconds: int = 300
+    ) -> str:
+        """Keep privacy-minimal evidence that a newer public snapshot was observed later."""
+        observations = self.data["desktop"]["calllog_observations"]
+        current = observations.get(device_id)
+        snapshot_id = str(snapshot["snapshot_id"])
+        backup_timestamp = snapshot.get("backup_timestamp")
+        if not isinstance(current, dict):
+            observations[device_id] = {
+                "baseline_snapshot_id": snapshot_id,
+                "baseline_backup_timestamp": backup_timestamp,
+                "baseline_observed_at": observed_at,
+                "last_snapshot_id": snapshot_id,
+                "last_backup_timestamp": backup_timestamp,
+                "last_observed_at": observed_at,
+                "observed_update_count": 0,
+            }
+            return "UNVERIFIED"
+        current["last_observed_at"] = observed_at
+        current["last_snapshot_id"] = snapshot_id
+        current["last_backup_timestamp"] = backup_timestamp
+        baseline_backup = current.get("baseline_backup_timestamp")
+        baseline_observed = current.get("baseline_observed_at")
+        qualifies = False
+        if isinstance(backup_timestamp, str) and isinstance(baseline_backup, str) and isinstance(baseline_observed, str):
+            try:
+                backup = datetime.fromisoformat(backup_timestamp.replace("Z", "+00:00"))
+                baseline = datetime.fromisoformat(baseline_backup.replace("Z", "+00:00"))
+                observed = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+                baseline_seen = datetime.fromisoformat(baseline_observed.replace("Z", "+00:00"))
+                qualifies = backup > baseline and (observed - baseline_seen).total_seconds() >= minimum_interval_seconds
+            except ValueError:
+                qualifies = False
+        if qualifies:
+            if snapshot_id != current.get("verified_snapshot_id"):
+                current["observed_update_count"] = int(current.get("observed_update_count", 0)) + 1
+                current["verified_snapshot_id"] = snapshot_id
+                current["verified_at"] = observed_at
+            current["baseline_snapshot_id"] = snapshot_id
+            current["baseline_backup_timestamp"] = backup_timestamp
+            current["baseline_observed_at"] = observed_at
+        return "OBSERVED_UPDATE" if int(current.get("observed_update_count", 0)) > 0 else "UNVERIFIED"
+
+    def remember_desktop_import_run(self, summary: dict[str, Any]) -> None:
+        runs = self.data["desktop"]["import_runs"]
+        runs.append(summary)
+        del runs[:-20]
+
+    def latest_desktop_import_run(self) -> dict[str, Any] | None:
+        runs = self.data["desktop"]["import_runs"]
+        return dict(runs[-1]) if runs and isinstance(runs[-1], dict) else None
 
     def remember_phone_call(self, call: dict[str, Any]) -> None:
         self.data["phone_calls"][call["call_id"]] = {
