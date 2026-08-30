@@ -257,9 +257,6 @@ class CloudHandoffPublisher:
 
     def publish(self) -> CloudPublishSummary:
         ready_events = sorted(self.ready_events.glob("*.json"))
-        if self.identity is None:
-            self._mark_unpublished(ready_events, "SALESPERSON_IDENTITY_UNCONFIGURED")
-            return CloudPublishSummary("SALESPERSON_IDENTITY_UNCONFIGURED", blocked=len(ready_events))
         if self.cloud_handoff_root is None:
             self._mark_unpublished(ready_events, "CLOUD_HANDOFF_ROOT_UNCONFIGURED")
             return CloudPublishSummary("CLOUD_HANDOFF_ROOT_UNCONFIGURED", blocked=len(ready_events))
@@ -272,6 +269,14 @@ class CloudHandoffPublisher:
                 event = _read_json(event_path, "local event")
                 validate_event(event)
                 event_id = event.get("event_id") if isinstance(event.get("event_id"), str) else None
+                if event.get("salesperson_identity_status") != "CONFIGURED":
+                    if event_id:
+                        self.state.remember_cloud_publication(
+                            event_id, relative_path=None, package_fingerprint=None,
+                            status="SALESPERSON_IDENTITY_UNCONFIGURED",
+                        )
+                    summary.blocked += 1
+                    continue
                 recording = recordings.get(event.get("recording_id"))
                 if recording is None:
                     raise CloudHandoffError("LOCAL_RECORDING_FOR_EVENT_ABSENT")
@@ -296,6 +301,10 @@ class CloudHandoffPublisher:
                 summary.conflicts += 1
             except Exception:
                 summary.failures += 1
+        if summary.blocked and not (
+            summary.published or summary.already_published or summary.conflicts or summary.failures
+        ):
+            summary.status = "SALESPERSON_IDENTITY_UNCONFIGURED"
         return summary
 
     def _mark_unpublished(self, event_paths: list[Path], status: str) -> None:
@@ -325,15 +334,19 @@ class CloudHandoffPublisher:
         return result
 
     def _publish_one(self, recording: dict[str, Any], event: dict[str, Any]) -> str:
-        assert self.identity is not None and self.cloud_handoff_root is not None
+        assert self.cloud_handoff_root is not None
         cloud_recording, cloud_event, audio_name = project_cloud_package(recording, event)
-        if cloud_event["salesperson_id"] != self.identity.salesperson_id or cloud_event["salesperson_name"] != self.identity.salesperson_name:
-            raise CloudHandoffError("EVENT_SALESPERSON_IDENTITY_NOT_FINALIZED")
+        identity = SalespersonIdentity(
+            salesperson_id=str(cloud_event["salesperson_id"]),
+            salesperson_name=str(cloud_event["salesperson_name"]),
+        )
         date_folder, call_folder = package_date_and_folder(cloud_event)
-        salesperson_directory = self.state.salesperson_directory(self.identity.salesperson_id) or salesperson_folder_name(self.identity)
+        salesperson_directory = self.state.salesperson_directory(identity.salesperson_id) or salesperson_folder_name(identity)
         destination = self.cloud_handoff_root / salesperson_directory / date_folder / call_folder
         if destination.exists():
-            return self._existing_package_outcome(destination, cloud_recording, cloud_event, salesperson_directory, date_folder, call_folder)
+            return self._existing_package_outcome(
+                destination, cloud_recording, cloud_event, salesperson_directory, date_folder, call_folder, identity
+            )
         source_media = self.ready_recordings / str(recording["media_filename"])
         if not source_media.is_file() or sha256_file(source_media) != recording["sha256"]:
             raise CloudHandoffError("LOCAL_MEDIA_CHANGED_BEFORE_CLOUD_HANDOFF")
@@ -350,7 +363,7 @@ class CloudHandoffPublisher:
             if final_validation.package_fingerprint != validation.package_fingerprint:
                 raise CloudHandoffError("CLOUD_PACKAGE_CHANGED_DURING_FINALIZE")
             relative_path = Path(salesperson_directory, date_folder, call_folder).as_posix()
-            self.state.remember_salesperson_directory(self.identity.salesperson_id, salesperson_directory)
+            self.state.remember_salesperson_directory(identity.salesperson_id, salesperson_directory)
             self.state.remember_cloud_publication(
                 final_validation.event_id, relative_path=relative_path,
                 package_fingerprint=final_validation.package_fingerprint, status="published",
@@ -362,7 +375,7 @@ class CloudHandoffPublisher:
 
     def _existing_package_outcome(
         self, destination: Path, expected_recording: dict[str, Any], expected_event: dict[str, Any],
-        salesperson_directory: str, date_folder: str, call_folder: str,
+        salesperson_directory: str, date_folder: str, call_folder: str, identity: SalespersonIdentity,
     ) -> str:
         try:
             existing = validate_cloud_package(destination)
@@ -373,7 +386,7 @@ class CloudHandoffPublisher:
         expected_fingerprint = _package_fingerprint(expected_recording, expected_event)
         relative_path = Path(salesperson_directory, date_folder, call_folder).as_posix()
         status = "already_published" if existing.package_fingerprint == expected_fingerprint else "published_immutable_enrichment_pending"
-        self.state.remember_salesperson_directory(self.identity.salesperson_id, salesperson_directory)
+        self.state.remember_salesperson_directory(identity.salesperson_id, salesperson_directory)
         self.state.remember_cloud_publication(
             existing.event_id, relative_path=relative_path, package_fingerprint=existing.package_fingerprint, status=status,
         )

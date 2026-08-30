@@ -1,12 +1,13 @@
 # sales-mobile-ingest
 
-Windows 本机将安卓电话录音以只读方式从 USB/MTP 采集到稳定的 `recording contract v1`，并自动发布供 Sales AI 消费的 `communication event contract v1`。完成销售身份和云端目录配置后，系统还会向坚果云客户端监控范围发布严格三文件的电话包。第一版不做转写、AI、CRM、微信、坚果云 API 调用或任何手机端删除；原始音频保持原始字节和扩展名。
+Windows 本机以只读 USB/MTP 采集 Android CallLog 公共导出与可选电话录音。核心链路是 `CallLog → PhoneCall v1 → optional RecordingAsset → CallRecordingLink v1`：电话存在不再以录音存在为前提。既有 recording/event contract v1 与严格三文件云包继续兼容；新的 call-fact/link 流独立承载无录音、missed、rejected 和迟到录音电话。
 
-## 三层边界
+## 四层边界
 
 1. **手机采集层**：`scripts/mtp_bridge.ps1` 使用 Windows Portable Device/Shell 访问手机。它不需要 ADB、开发者模式或手机盘符。
-2. **标准化层**：Python 先复制到 `inbox/recordings/.stage`，校验尺寸、计算 SHA-256、去重，再发布媒体和 JSON sidecar。
-3. **本机事件与云端交付**：录音 JSON 在 `ready/recordings` 最后出现；随后才在 `ready/events` 发布通信事件 JSON。配置完成后，系统从这两个 canonical 对象构建独立的三文件云端电话包；下游无需理解 OPPO 路径、MTP 或 Windows 盘符。
+2. **Call-first 标准化层**：公共 XML 经 artifact/snapshot、replaceable provider parser 与稳定 row identity，原子发布 `ready/calls`；snapshot freshness 不等同于历史完整性。
+3. **可选录音与关系层**：原有 staging、size、SHA-256、recording sidecar/event 不变；`ready/call-links` 独立表达 EXACT、HIGH_CONFIDENCE、AMBIGUOUS、NO_MATCH 和 late reconciliation。
+4. **下游交付层**：本机 `ready/calls`/`ready/call-links` 是正式 schema-validated boundary；配置同步根后发布独立 `_phone-call-facts-v1`/`_call-recording-links-v1`。旧三文件电话包保持严格、不可变。
 
 真实录音、客户数据、本机配置、状态和日志绝不进入 GitHub。详见 [contract/接口说明.md](contract/接口说明.md)。
 
@@ -25,8 +26,8 @@ python -m venv .venv
 数据根目录优先级（高到低）：
 
 1. `--data-root <path>`
-2. 环境变量 `SALES_MOBILE_INGEST_DATA_ROOT`
-3. 项目本机 `config.local.json` 的 `data_root`
+2. 项目本机 `config.local.json` 的 `data_root`
+3. 环境变量 `SALES_MOBILE_INGEST_DATA_ROOT`
 4. 当前 Windows 用户的 `Documents\SalesMobileIngestData`
 
 复制 `config.example.json` 为 `config.local.json` 后可修改默认根目录；`config.local.json` 被 Git 忽略。业务代码没有 `C:`、`D:` 或 `E:` 的前提。
@@ -46,18 +47,29 @@ python -m venv .venv
 # 仅读取得受限公共 XML，并输出不含字段值的真实 schema 摘要
 .\.venv\Scripts\python.exe -m sales_mobile_ingest inspect-calllog-export
 
-# 增量解析已验证的公共 XML；只在唯一 HIGH_CONFIDENCE / EXACT 匹配时原子 enrich event
+# 增量解析公共 XML；每条可靠 row 建立 PhoneCall，再保守关联录音
 .\.venv\Scripts\python.exe -m sales_mobile_ingest ingest-calllog-export --once
+
+# 发现/查看本机设备 enrollment，不显示 raw Shell alias
+.\.venv\Scripts\python.exe -m sales_mobile_ingest list-devices --discover
+.\.venv\Scripts\python.exe -m sales_mobile_ingest show-device --device-id "<dev_...>"
+
+# 建立/结束有效期销售归属；时间必须带时区，区间不允许 overlap
+.\.venv\Scripts\python.exe -m sales_mobile_ingest assign-device --device-id "<dev_...>" --salesperson-id "S007" --salesperson-name "张三" --effective-from "2026-01-01T00:00:00+08:00"
+.\.venv\Scripts\python.exe -m sales_mobile_ingest end-device-assignment --device-id "<dev_...>" --effective-to "2026-10-01T00:00:00+08:00"
 
 # 只读检查坚果云客户端、已配置 root 与候选同步目录；多个候选时不会猜测
 .\.venv\Scripts\python.exe -m sales_mobile_ingest inspect-cloud-handoff
 
-# 一次性设置明确的业务销售身份和用户确认的坚果云同步根（均写入 gitignored config.local.json）
+# legacy 单销售兼容入口；新部署使用 per-device assignment
 .\.venv\Scripts\python.exe -m sales_mobile_ingest configure-salesperson --salesperson-id "S007" --salesperson-name "张三"
+
+# 用户确认的坚果云同步根仍写入 gitignored config.local.json
 .\.venv\Scripts\python.exe -m sales_mobile_ingest configure-cloud-handoff --sync-root "<用户确认的坚果云同步根>"
 
 # 从当前 ready recording/event 构建并发布完整三文件电话包；watch 也会自动执行
 .\.venv\Scripts\python.exe -m sales_mobile_ingest publish-cloud-handoff --once
+.\.venv\Scripts\python.exe -m sales_mobile_ingest publish-call-facts --once
 .\.venv\Scripts\python.exe -m sales_mobile_ingest validate-cloud-package --package-dir "<一个电话文件夹>"
 
 # 一次增量采集
@@ -90,22 +102,25 @@ python -m venv .venv
 inbox/recordings/.stage/   # 尚未完成校验的本地暂存
 ready/recordings/          # 下游消费的媒体 + 同名 JSON
 ready/events/              # 录音 pair 完整后发布的 communication event JSON
+ready/calls/               # canonical PhoneCall v1；无需录音
+ready/call-links/          # recording-centric CallRecordingLink v1
 failed/recordings/         # 保留失败证据，不静默丢失
 state/                     # 增量导入状态和成功目录缓存
 logs/                      # 隐私最小化运行日志
 diagnostics/probe-reports/ # gitignored 的脱敏本机诊断
 diagnostics/calllog-backup/ # gitignored 的原始公共 XML、schema 与关联摘要
+diagnostics/migrations/    # legacy migration 私有备份/evidence
 ```
 
 ## 真实状态
 
 参见 [docs/当前状态.md](docs/当前状态.md) 与 [docs/厂商适配矩阵.md](docs/厂商适配矩阵.md)。前者严格区分合成测试和本机真机验证；后者将 `REAL_DEVICE_VERIFIED`、`OFFICIAL_DOC_CANDIDATE`、`DOC_EVIDENCE_UNAVAILABLE` 与 generic heuristic 明确分开。
 
-截至 2026-08-20，本开发机已用显式开发测试身份 `DEV-001 / 开发者测试` 完成一次真实三文件电话包的本地坚果云 handoff、重复发布去重和 watcher 重启验证；该身份与 handoff root 都只在 gitignored 本机配置中。已验证的是运行中的坚果云客户端对已注册本地 sync root 的交付边界，不等同于远端传播或云端消费者验收。
+2026-08-20 的既有 OPPO 验证曾使用仅存于 gitignored config 的显式开发测试身份完成真实三文件本地 sync-root handoff、重复发布去重和 watcher 重启。该证据只到本机 registered sync root，不等同于远端传播或云端消费者验收；本轮工作区没有 legacy config/state。
 
-下游事件语义见 [contract/通信事件接口说明.md](contract/通信事件接口说明.md)。可选的 `salesperson_id` 只能写入本机 gitignored `config.local.json`；未配置时事件明确为 `UNCONFIGURED`，程序绝不从 Windows 或 Git 身份猜测。
+Call-first 语义见 [contract/Call-first接口说明.md](contract/Call-first接口说明.md)。新 PhoneCall 的销售归属只来自 effective-dated Device Assignment；未知设备不会继承本机 legacy salesperson。旧 event v1 的 `configure-salesperson` 仅保留兼容投影和受限迁移。
 
-正式云端消费者接口见 [docs/云端电话包接口.md](docs/云端电话包接口.md)：每通电话只有 `audio.<ext>`、`recording.json`、`event.json` 三个文件。`data_root` 的 state、日志、诊断和 XML 永不作为坚果云交付目录整体同步。
+正式云端消费者接口见 [docs/云端电话包接口.md](docs/云端电话包接口.md)：旧 recording-backed 电话目录仍严格只有 `audio.<ext>`、`recording.json`、`event.json`；call-only JSON 使用独立版本目录。`data_root` 的 state、日志、诊断和 XML 永不整体同步。
 
 当前真实 OPPO 样本的电话身份能力边界见 [docs/通话身份解析能力.md](docs/通话身份解析能力.md)。它明确区分“录音自身没有号码证据”与“普通 MTP/WPD 不公开通话记录”，不会把任意长数字或文件修改时间伪装成客户身份。
 
@@ -113,7 +128,7 @@ diagnostics/calllog-backup/ # gitignored 的原始公共 XML、schema 与关联�
 
 当前选择的下一条来源是用户主动在手机上使用 SyncTech `SMS Backup & Restore` 创建的 **CallLog-only 本地 XML 备份**，再经普通 USB/MTP 只读取得。它不是本项目的永久厂商依赖，也不需要 ADB、开发者模式或项目自带 Android App。
 
-OPPO A6 Pro 5G 已通过普通 MTP 真机验证：仅在 `SMSBackupRestore` 中有界发现一个 `calls-*.xml`、以 staging → size → SHA-256 复制到 gitignored diagnostics，按真实 `calls/call` schema 解析。XML artifact、canonical row 与 event 均已验证重复运行不产生第二份对象。当前真实关联为 `HIGH_CONFIDENCE`，不会伪称 `EXACT`；原始 XML 不构成 downstream contract。设计边界、隐私规则和证据说明见 [docs/通话记录导出接口.md](docs/通话记录导出接口.md)。
+OPPO A6 Pro 5G 已通过普通 MTP 真机验证既有 XML/录音闭环；当前真实关联仍是 `HIGH_CONFIDENCE`，不会伪称 `EXACT`。本轮新增 PhoneCall、双卡、多人多机、freshness 与 late-arrival 只完成 synthetic automated validation。Redmi Note 12 5G / Note 15 没有真机证据，保持 physical pending。设计与证据边界见 [docs/通话记录导出接口.md](docs/通话记录导出接口.md) 和 [docs/手机初始化与Redmi物理验收.md](docs/手机初始化与Redmi物理验收.md)。
 
 ## 历史 Android CallLog feasibility probe（非生产、非当前优先路径）
 

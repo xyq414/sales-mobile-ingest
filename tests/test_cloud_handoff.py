@@ -44,6 +44,8 @@ def _source(media: Path, *, timestamp: str = "2025-01-15T02:15:30+00:00") -> dic
         "modified_at": timestamp,
         "device_vendor": "OPPO",
         "device_model": "Synthetic OPPO",
+        "device_key": "synthetic-oppo-device",
+        "device_name": "Synthetic OPPO",
         "adapter": "oppo-v1",
         "duration_seconds": 190.0,
         "duration_source": "wpd",
@@ -143,6 +145,9 @@ def test_cloud_publish_creates_exactly_three_portable_files(tmp_path: Path) -> N
 
 def test_missing_salesperson_blocks_publish_without_creating_any_cloud_package(tmp_path: Path) -> None:
     recordings, events, _, event = _write_local_pair(tmp_path / "data")
+    event_path = events / f"{event['event_id']}.json"
+    unassigned = {**event, "salesperson_id": None, "salesperson_name": None, "salesperson_identity_status": "UNCONFIGURED"}
+    event_path.write_text(json.dumps(unassigned), encoding="utf-8")
     cloud_root = tmp_path / "cloud-root"
     cloud_root.mkdir()
     publisher = CloudHandoffPublisher(
@@ -154,6 +159,17 @@ def test_missing_salesperson_blocks_publish_without_creating_any_cloud_package(t
     assert summary.blocked == 1
     assert list(cloud_root.iterdir()) == []
     assert publisher.state.cloud_publication(event["event_id"])["status"] == "SALESPERSON_IDENTITY_UNCONFIGURED"
+
+
+def test_finalized_event_identity_publishes_without_workstation_wide_identity(tmp_path: Path) -> None:
+    recordings, events, _, _ = _write_local_pair(tmp_path / "data")
+    cloud_root = tmp_path / "cloud-root"
+    cloud_root.mkdir()
+    publisher = CloudHandoffPublisher(
+        data_root=tmp_path / "data", ready_recordings=recordings, ready_events=events,
+        state=StateStore(tmp_path / "data" / "state"), identity=None, cloud_handoff_root=cloud_root,
+    )
+    assert publisher.publish().published == 1
 
 
 def test_existing_valid_package_is_idempotent_and_late_enrichment_does_not_duplicate(tmp_path: Path) -> None:
@@ -217,6 +233,15 @@ def test_watch_cycle_automatically_publishes_a_complete_event_when_configured(tm
     monkeypatch.setattr(service_module, "resolve_salesperson_identity", lambda: IDENTITY)
     monkeypatch.setattr(service_module, "resolve_cloud_handoff_root", lambda: cloud_root)
     ingestor = Ingestor(tmp_path / "data", bridge=FakeBridge())
+    device_id = ingestor.device_registry.observe(
+        observed_alias="synthetic-oppo-device", display_name="Synthetic OPPO", vendor="OPPO", model="Synthetic OPPO"
+    )
+    ingestor.assign_device(
+        device_id=device_id,
+        salesperson_id=IDENTITY.salesperson_id,
+        salesperson_name=IDENTITY.salesperson_name,
+        effective_from="2020-01-01T00:00:00+00:00",
+    )
     staged = ingestor.paths["stage"] / "synthetic.m4a"
     staged.write_bytes(b"automatic-watch-publish")
     assert ingestor.ingest_staged_for_test(staged, _source(staged)) == "imported"

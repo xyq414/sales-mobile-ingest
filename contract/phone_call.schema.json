@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sales-mobile-ingest.local/contract/phone_call.schema.json",
+  "title": "Sales Mobile Ingest Canonical PhoneCall v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "call_id", "device_id", "device_vendor", "device_model", "source_provider", "source_row_id",
+    "source_artifact_sha256", "source_artifact_sha256s", "source_snapshot_id", "source_snapshot_ids", "snapshot", "occurred_at", "occurred_at_source",
+    "occurred_at_confidence", "duration_seconds", "duration_source", "phone_number_raw",
+    "phone_number_normalized", "phone_number_source", "contact_name", "contact_name_source",
+    "direction", "direction_source", "disposition", "disposition_source", "raw_call_type",
+    "subscription", "salesperson_id", "salesperson_name", "salesperson_assignment_id",
+    "salesperson_attribution_status", "created_at", "ingested_at", "last_enriched_at"
+  ],
+  "properties": {
+    "schema_version": {"const": "phone-call/v1"},
+    "call_id": {"type": "string", "pattern": "^pc_[a-f0-9]{64}$"},
+    "device_id": {"type": "string", "pattern": "^dev_[a-f0-9-]{36}$"},
+    "device_vendor": {"type": ["string", "null"]},
+    "device_model": {"type": ["string", "null"]},
+    "source_provider": {"type": "string", "minLength": 1},
+    "source_row_id": {"type": "string", "pattern": "^clg_[a-f0-9]{64}$"},
+    "source_artifact_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "source_artifact_sha256s": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-f0-9]{64}$"}},
+    "source_snapshot_id": {"type": "string", "pattern": "^snp_[a-f0-9]{64}$"},
+    "source_snapshot_ids": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "pattern": "^snp_[a-f0-9]{64}$"}},
+    "snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["backup_timestamp", "imported_at", "root_count", "backup_mode", "freshness", "parse_status", "stale_after_seconds"],
+      "properties": {
+        "backup_timestamp": {"type": ["string", "null"], "format": "date-time"},
+        "imported_at": {"type": "string", "format": "date-time"},
+        "root_count": {"type": ["integer", "null"], "minimum": 0},
+        "backup_mode": {"type": ["string", "null"]},
+        "freshness": {"enum": ["FRESH", "STALE", "UNKNOWN"]},
+        "parse_status": {"enum": ["PARSED", "COUNT_MISMATCH"]},
+        "stale_after_seconds": {"type": "integer", "minimum": 60}
+      }
+    },
+    "occurred_at": {"type": "string", "format": "date-time"},
+    "occurred_at_source": {"const": "calllog_export"},
+    "occurred_at_confidence": {"enum": ["high", "medium", "low", "unknown"]},
+    "duration_seconds": {"type": ["number", "integer", "null"], "minimum": 0},
+    "duration_source": {"enum": ["calllog_export", "unknown"]},
+    "phone_number_raw": {"type": ["string", "null"]},
+    "phone_number_normalized": {"type": ["string", "null"]},
+    "phone_number_source": {"enum": ["calllog_export", "unknown"]},
+    "contact_name": {"type": ["string", "null"]},
+    "contact_name_source": {"enum": ["calllog_export", "unknown"]},
+    "direction": {"enum": ["incoming", "outgoing", "unknown"]},
+    "direction_source": {"const": "calllog_export"},
+    "disposition": {"enum": ["missed", "rejected", "voicemail", "blocked", "answered_externally", "unknown"]},
+    "disposition_source": {"const": "calllog_export"},
+    "raw_call_type": {"type": ["integer", "string", "null"]},
+    "subscription": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["subscription_id", "component_name", "slot_index", "source"],
+      "properties": {
+        "subscription_id": {"type": ["string", "null"]},
+        "component_name": {"type": ["string", "null"]},
+        "slot_index": {"type": ["integer", "null"], "minimum": 0},
+        "source": {"enum": ["calllog_export", "unknown"]}
+      }
+    },
+    "salesperson_id": {"type": ["string", "null"]},
+    "salesperson_name": {"type": ["string", "null"]},
+    "salesperson_assignment_id": {"type": ["string", "null"], "pattern": "^asg_[a-f0-9-]{36}$"},
+    "salesperson_attribution_status": {"enum": ["ASSIGNED", "UNASSIGNED", "AMBIGUOUS"]},
+    "created_at": {"type": "string", "format": "date-time"},
+    "ingested_at": {"type": "string", "format": "date-time"},
+    "last_enriched_at": {"type": "string", "format": "date-time"}
+  }
+}

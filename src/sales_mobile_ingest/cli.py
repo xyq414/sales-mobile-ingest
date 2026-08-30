@@ -55,6 +55,25 @@ def build_parser() -> argparse.ArgumentParser:
     configure_salesperson.add_argument("--salesperson-id", required=True)
     configure_salesperson.add_argument("--salesperson-name", required=True)
     configure_salesperson.add_argument("--data-root", dest="command_data_root", help=argparse.SUPPRESS)
+    list_devices = subparsers.add_parser(
+        "list-devices", help="List local enrollments and effective-dated salesperson assignment history",
+    )
+    list_devices.add_argument("--discover", action="store_true", help="Run a bounded read-only MTP discovery first")
+    list_devices.add_argument("--data-root", dest="command_data_root", help=argparse.SUPPRESS)
+    show_device = subparsers.add_parser("show-device", help="Show one enrolled device and its assignment history")
+    show_device.add_argument("--device-id", required=True)
+    show_device.add_argument("--data-root", dest="command_data_root", help=argparse.SUPPRESS)
+    assign_device = subparsers.add_parser("assign-device", help="Create a non-overlapping salesperson assignment")
+    assign_device.add_argument("--device-id", required=True)
+    assign_device.add_argument("--salesperson-id", required=True)
+    assign_device.add_argument("--salesperson-name", required=True)
+    assign_device.add_argument("--effective-from", required=True, help="Inclusive ISO 8601 timestamp with timezone")
+    assign_device.add_argument("--effective-to", help="Exclusive ISO 8601 timestamp with timezone")
+    assign_device.add_argument("--data-root", dest="command_data_root", help=argparse.SUPPRESS)
+    end_assignment = subparsers.add_parser("end-device-assignment", help="End the one open device assignment")
+    end_assignment.add_argument("--device-id", required=True)
+    end_assignment.add_argument("--effective-to", required=True, help="Exclusive ISO 8601 timestamp with timezone")
+    end_assignment.add_argument("--data-root", dest="command_data_root", help=argparse.SUPPRESS)
     configure_handoff = subparsers.add_parser(
         "configure-cloud-handoff", help="Set an explicitly chosen existing cloud client sync subdirectory",
     )
@@ -72,6 +91,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     publish_handoff.add_argument("--once", action="store_true", required=True)
     publish_handoff.add_argument("--data-root", dest="command_data_root", help=argparse.SUPPRESS)
+    publish_call_facts = subparsers.add_parser(
+        "publish-call-facts", help="Publish the independent phone-call/v1 JSON stream; audio is not required",
+    )
+    publish_call_facts.add_argument("--once", action="store_true", required=True)
+    publish_call_facts.add_argument("--data-root", dest="command_data_root", help=argparse.SUPPRESS)
     validate_package = subparsers.add_parser(
         "validate-cloud-package", help="Validate one cloud call folder without reading phone or state data",
     )
@@ -132,6 +156,29 @@ def main(argv: list[str] | None = None) -> int:
             update_local_config({"salesperson_id": salesperson_id, "salesperson_name": salesperson_name})
             print(json.dumps({"status": "SALESPERSON_IDENTITY_CONFIGURED", "config_path": "config.local.json"}, ensure_ascii=False))
             return 0
+        if args.command == "list-devices":
+            print(json.dumps({"devices": ingestor.list_devices(discover=args.discover)}, ensure_ascii=False, indent=2))
+            return 0
+        if args.command == "show-device":
+            matches = [item for item in ingestor.list_devices() if item["device_id"] == args.device_id]
+            if len(matches) != 1:
+                raise ConfigError("unknown device_id")
+            print(json.dumps(matches[0], ensure_ascii=False, indent=2))
+            return 0
+        if args.command == "assign-device":
+            assignment = ingestor.assign_device(
+                device_id=args.device_id,
+                salesperson_id=args.salesperson_id,
+                salesperson_name=args.salesperson_name,
+                effective_from=args.effective_from,
+                effective_to=args.effective_to,
+            )
+            print(json.dumps({"status": "DEVICE_ASSIGNMENT_CREATED", "assignment": assignment}, ensure_ascii=False, indent=2))
+            return 0
+        if args.command == "end-device-assignment":
+            assignment = ingestor.end_device_assignment(device_id=args.device_id, effective_to=args.effective_to)
+            print(json.dumps({"status": "DEVICE_ASSIGNMENT_ENDED", "assignment": assignment}, ensure_ascii=False, indent=2))
+            return 0
         if args.command == "configure-cloud-handoff":
             root = resolve_cloud_handoff_root(args.root or args.sync_root)
             if root is None:
@@ -152,6 +199,10 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "publish-cloud-handoff":
             summary = ingestor.publish_cloud_handoff().as_dict()
+            print(json.dumps({"data_root": str(data_root), **summary}, ensure_ascii=False))
+            return 0
+        if args.command == "publish-call-facts":
+            summary = ingestor.publish_call_facts().as_dict()
             print(json.dumps({"data_root": str(data_root), **summary}, ensure_ascii=False))
             return 0
         if args.command == "validate-cloud-package":

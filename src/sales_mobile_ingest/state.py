@@ -2,32 +2,52 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import tempfile
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 
 class StateStore:
+    CURRENT_VERSION = 2
+
     def __init__(self, state_dir: Path) -> None:
         self.path = state_dir / "ingest-state.json"
+        self.migration_backup_path: Path | None = None
         self.data: dict[str, Any] = self._load()
 
     def _load(self) -> dict[str, Any]:
         if not self.path.exists():
             return {
-                "version": 1,
+                "version": self.CURRENT_VERSION,
                 "imports": {},
                 "sources": {},
                 "devices": {},
                 "calllog_exports": {"sources": {}, "artifacts": {}, "rows": {}, "enrichments": {}},
                 "cloud_handoff": {"publications": {}, "salesperson_directories": {}},
+                "recording_devices": {},
+                "phone_calls": {},
+                "call_recording_links": {},
+                "calllog_snapshots": {},
+                "call_fact_handoff": {"publications": {}},
+                "device_registry": {"devices": {}, "alias_index": {}, "assignments": {}, "migration": {}},
             }
         try:
             loaded = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise RuntimeError(f"Cannot read persistent ingest state: {exc}") from exc
-        for key, empty in (("imports", {}), ("sources", {}), ("devices", {})):
+        version = loaded.get("version", 1)
+        if not isinstance(version, int) or version < 1 or version > self.CURRENT_VERSION:
+            raise RuntimeError(f"Unsupported ingest state version: {version}")
+        if version < self.CURRENT_VERSION:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            self.migration_backup_path = self.path.parent / f"ingest-state.v{version}.{stamp}.backup.json"
+            shutil.copy2(self.path, self.migration_backup_path)
+        for key, empty in (("imports", {}), ("sources", {}), ("devices", {}), ("recording_devices", {}),
+                           ("phone_calls", {}), ("call_recording_links", {}), ("calllog_snapshots", {})):
             loaded.setdefault(key, empty)
         calllog_exports = loaded.setdefault("calllog_exports", {})
         calllog_exports.setdefault("sources", {})
@@ -37,6 +57,20 @@ class StateStore:
         cloud_handoff = loaded.setdefault("cloud_handoff", {})
         cloud_handoff.setdefault("publications", {})
         cloud_handoff.setdefault("salesperson_directories", {})
+        registry = loaded.setdefault("device_registry", {})
+        for key in ("devices", "alias_index", "assignments", "migration"):
+            registry.setdefault(key, {})
+        loaded.setdefault("call_fact_handoff", {}).setdefault("publications", {})
+        loaded["version"] = self.CURRENT_VERSION
+        if version < self.CURRENT_VERSION:
+            loaded.setdefault("state_migrations", []).append({
+                "from_version": version,
+                "to_version": self.CURRENT_VERSION,
+                "migrated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "backup_filename": self.migration_backup_path.name if self.migration_backup_path else None,
+            })
+            self.data = loaded
+            self.save()
         return loaded
 
     def save(self) -> None:
@@ -72,6 +106,13 @@ class StateStore:
 
     def remember_import(self, sha256: str, media_filename: str) -> None:
         self.data["imports"][sha256] = {"media_filename": media_filename}
+
+    def remember_recording_device(self, recording_id: str, device_id: str) -> None:
+        self.data["recording_devices"][recording_id] = device_id
+
+    def recording_device(self, recording_id: str) -> str | None:
+        value = self.data["recording_devices"].get(recording_id)
+        return value if isinstance(value, str) else None
 
     def installation_id(self) -> str:
         value = self.data.get("installation_id")
@@ -137,6 +178,30 @@ class StateStore:
             row for row in self.data["calllog_exports"]["rows"].values()
             if isinstance(row, dict) and row.get("device_key") == device_key
         ]
+
+    def calllog_rows_for_device_id(self, device_id: str) -> list[dict[str, Any]]:
+        return [
+            row for row in self.data["calllog_exports"]["rows"].values()
+            if isinstance(row, dict) and row.get("device_id") == device_id
+        ]
+
+    def remember_calllog_snapshot(self, snapshot: dict[str, Any]) -> None:
+        self.data["calllog_snapshots"][snapshot["snapshot_id"]] = snapshot
+
+    def remember_phone_call(self, call: dict[str, Any]) -> None:
+        self.data["phone_calls"][call["call_id"]] = {
+            "device_id": call["device_id"],
+            "source_row_id": call["source_row_id"],
+            "path": f"ready/calls/{call['call_id']}.json",
+        }
+
+    def remember_call_recording_link(self, link: dict[str, Any]) -> None:
+        self.data["call_recording_links"][link["recording_id"]] = {
+            "link_id": link["link_id"],
+            "call_id": link["call_id"],
+            "status": link["status"],
+            "path": f"ready/call-links/{link['link_id']}.json",
+        }
 
     def calllog_enrichment_matches(self, event_id: str, canonical_call_id: str) -> bool:
         return self.data["calllog_exports"]["enrichments"].get(event_id) == canonical_call_id

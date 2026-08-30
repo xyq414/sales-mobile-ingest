@@ -18,7 +18,13 @@ HIGH_CONFIDENCE = "HIGH_CONFIDENCE"
 AMBIGUOUS = "AMBIGUOUS"
 NO_MATCH = "NO_MATCH"
 
-_DIRECTION_BY_TYPE = {1: "incoming", 2: "outgoing"}
+_DIRECTION_BY_TYPE = {
+    1: "incoming", 2: "outgoing", 3: "incoming", 4: "unknown",
+    5: "incoming", 6: "incoming", 7: "incoming",
+}
+_DISPOSITION_BY_TYPE = {
+    3: "missed", 4: "voicemail", 5: "rejected", 6: "blocked", 7: "answered_externally",
+}
 _RELIABLE_RECORDING_TIME_SOURCES = {"recorded_at", "filename", "filename_datetime", "calllog_export"}
 _EMPTY_IDENTITY_VALUES = {"", "-1", "unknown", "(unknown)", "null", "none"}
 
@@ -120,11 +126,17 @@ def parse_synctech_calllog_export(path: Path, *, artifact_sha256: str) -> list[d
             raise CallLogExportError("SyncTech call row duration must not be negative")
         number = _meaningful_identity(attributes.get("number"))
         contact_name = _meaningful_identity(attributes.get("contact_name"))
+        subscription_id = _meaningful_identity(attributes.get("subscription_id"))
+        subscription_component_name = _meaningful_identity(attributes.get("subscription_component_name"))
+        subscription_slot_index = _explicit_nonnegative_int(
+            attributes.get("subscription_slot_index") or attributes.get("sim_slot")
+        )
         canonical_id = _canonical_call_id(
             date_epoch_ms=date_epoch_ms,
             duration_seconds=duration_seconds,
             call_type=call_type,
             number=number,
+            subscription_id=subscription_id,
         )
         rows.append({
             "provider_id": SYNCTECH_PROVIDER_ID,
@@ -135,8 +147,12 @@ def parse_synctech_calllog_export(path: Path, *, artifact_sha256: str) -> list[d
             "duration_seconds": duration_seconds,
             "call_type": call_type,
             "call_direction": _DIRECTION_BY_TYPE.get(call_type, "unknown"),
+            "call_disposition": _DISPOSITION_BY_TYPE.get(call_type, "unknown"),
             "phone_number_raw": number,
             "contact_name": contact_name,
+            "subscription_id": subscription_id,
+            "subscription_component_name": subscription_component_name,
+            "subscription_slot_index": subscription_slot_index,
         })
     return rows
 
@@ -149,6 +165,7 @@ class CallLogCorrelation:
     duration_delta_seconds: float | None = None
     time_alignment: str | None = None
     matched_row: dict[str, Any] | None = None
+    candidate_rows: tuple[dict[str, Any], ...] = ()
 
     def safe_summary(self) -> dict[str, Any]:
         return {
@@ -207,7 +224,12 @@ def correlate_recording_to_calllog(
     if not candidates:
         return CallLogCorrelation(status=NO_MATCH, candidate_count=0)
     if len(candidates) > 1:
-        return CallLogCorrelation(status=AMBIGUOUS, candidate_count=len(candidates), time_alignment=time_alignment)
+        return CallLogCorrelation(
+            status=AMBIGUOUS,
+            candidate_count=len(candidates),
+            time_alignment=time_alignment,
+            candidate_rows=tuple(item[2] for item in candidates),
+        )
     time_delta, duration_delta, row = candidates[0]
     exact_allowed = occurred_at_source in _RELIABLE_RECORDING_TIME_SOURCES and time_alignment == "direct"
     status = EXACT if exact_allowed and time_delta <= 60 and duration_delta <= 1 else HIGH_CONFIDENCE
@@ -218,6 +240,7 @@ def correlate_recording_to_calllog(
         duration_delta_seconds=round(duration_delta, 3),
         time_alignment=time_alignment,
         matched_row=row,
+        candidate_rows=(row,),
     )
 
 
@@ -264,8 +287,10 @@ def safe_rows_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "parsed_row_count": len(rows),
         "direction_counts": dict(sorted(Counter(str(row["call_direction"]) for row in rows).items())),
+        "disposition_counts": dict(sorted(Counter(str(row["call_disposition"]) for row in rows).items())),
         "phone_number_present_count": sum(1 for row in rows if row.get("phone_number_raw")),
         "contact_name_present_count": sum(1 for row in rows if row.get("contact_name")),
+        "subscription_id_present_count": sum(1 for row in rows if row.get("subscription_id")),
     }
 
 
@@ -286,6 +311,69 @@ def _meaningful_identity(value: str | None) -> str | None:
     return candidate if candidate.casefold() not in _EMPTY_IDENTITY_VALUES else None
 
 
-def _canonical_call_id(*, date_epoch_ms: int, duration_seconds: float, call_type: int, number: str | None) -> str:
-    stable = f"{SYNCTECH_PROVIDER_ID}|{date_epoch_ms}|{duration_seconds:.3f}|{call_type}|{number or ''}"
+def _explicit_nonnegative_int(value: str | None) -> int | None:
+    if value is None or not re.fullmatch(r"\d+", value.strip()):
+        return None
+    parsed = int(value)
+    return parsed if parsed >= 0 else None
+
+
+def _canonical_call_id(
+    *, date_epoch_ms: int, duration_seconds: float, call_type: int, number: str | None,
+    subscription_id: str | None,
+) -> str:
+    stable = (
+        f"{SYNCTECH_PROVIDER_ID}|{date_epoch_ms}|{duration_seconds:.3f}|{call_type}|"
+        f"{number or ''}|{subscription_id or ''}"
+    )
     return "clg_" + hashlib.sha256(stable.encode("utf-8")).hexdigest()
+
+
+def synctech_snapshot_metadata(
+    path: Path,
+    *,
+    artifact_sha256: str,
+    imported_at: str,
+    stale_after_seconds: int = 48 * 60 * 60,
+    device_id: str | None = None,
+) -> dict[str, Any]:
+    """Extract trustworthy root metadata without claiming history completeness."""
+    _validate_xml_artifact(path)
+    try:
+        root = ElementTree.parse(path).getroot()
+    except ElementTree.ParseError as exc:
+        raise CallLogExportError("call-log export is not well-formed XML") from exc
+    if _local_name(root.tag) != "calls":
+        raise CallLogExportError("unexpected SyncTech export root element")
+    attributes = {_local_name(name): value for name, value in root.attrib.items()}
+    root_count = _explicit_nonnegative_int(attributes.get("count"))
+    backup_timestamp = None
+    backup_raw = attributes.get("backup_date") or attributes.get("backup_timestamp")
+    if backup_raw and re.fullmatch(r"\d+", backup_raw):
+        epoch = int(backup_raw)
+        if 946_684_800_000 <= epoch <= 4_102_444_800_000:
+            backup_timestamp = datetime.fromtimestamp(epoch / 1000, tz=timezone.utc).isoformat()
+    imported = datetime.fromisoformat(imported_at.replace("Z", "+00:00"))
+    if imported.tzinfo is None:
+        raise CallLogExportError("snapshot import timestamp must include a timezone")
+    if backup_timestamp is None:
+        freshness = "UNKNOWN"
+    else:
+        age = (imported - datetime.fromisoformat(backup_timestamp)).total_seconds()
+        freshness = "UNKNOWN" if age < -300 else ("FRESH" if age <= stale_after_seconds else "STALE")
+    mode = _meaningful_identity(attributes.get("backup_type") or attributes.get("type") or attributes.get("mode"))
+    snapshot_id = "snp_" + hashlib.sha256(
+        f"{SYNCTECH_PROVIDER_ID}|{device_id or ''}|{artifact_sha256}".encode("utf-8")
+    ).hexdigest()
+    return {
+        "snapshot_id": snapshot_id,
+        "provider_id": SYNCTECH_PROVIDER_ID,
+        "artifact_sha256": artifact_sha256,
+        "backup_timestamp": backup_timestamp,
+        "imported_at": imported.isoformat(),
+        "root_count": root_count,
+        "backup_mode": mode,
+        "freshness": freshness,
+        "parse_status": "PARSED",
+        "stale_after_seconds": stale_after_seconds,
+    }

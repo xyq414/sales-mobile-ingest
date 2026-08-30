@@ -1,0 +1,20 @@
+{
+  "schema_version": "call-recording-link/v1",
+  "link_id": "lnk_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "recording_id": "rec_ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "call_id": "pc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "device_id": "dev_00000000-0000-0000-0000-000000000001",
+  "status": "HIGH_CONFIDENCE",
+  "candidate_call_ids": [
+    "pc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  ],
+  "provider_ids": [
+    "synctech-sms-backup-restore/v1"
+  ],
+  "time_delta_seconds": 3.208,
+  "duration_delta_seconds": 0.028,
+  "time_alignment": "wpd_modified_at_local_offset_minus_recording_duration",
+  "evidence_source": "calllog_recording_reconciliation",
+  "created_at": "2026-08-30T00:00:00+00:00",
+  "last_evaluated_at": "2026-08-30T00:00:00+00:00"
+}

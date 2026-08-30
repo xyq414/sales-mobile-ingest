@@ -1,6 +1,7 @@
 {
   "data_root": "%USERPROFILE%\\Documents\\SalesMobileIngestData",
   "watch_interval_seconds": 45,
+  "calllog_freshness_seconds": 172800,
   "salesperson_id": null,
   "salesperson_name": null,
   "cloud_handoff_root": null

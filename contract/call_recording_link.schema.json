@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sales-mobile-ingest.local/contract/call_recording_link.schema.json",
+  "title": "Sales Mobile Ingest Call Recording Link v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "link_id", "recording_id", "call_id", "device_id", "status",
+    "candidate_call_ids", "provider_ids", "time_delta_seconds", "duration_delta_seconds", "time_alignment",
+    "evidence_source", "created_at", "last_evaluated_at"
+  ],
+  "properties": {
+    "schema_version": {"const": "call-recording-link/v1"},
+    "link_id": {"type": "string", "pattern": "^lnk_[a-f0-9]{64}$"},
+    "recording_id": {"type": "string", "pattern": "^rec_[a-f0-9]{64}$"},
+    "call_id": {"type": ["string", "null"], "pattern": "^pc_[a-f0-9]{64}$"},
+    "device_id": {"type": ["string", "null"], "pattern": "^dev_[a-f0-9-]{36}$"},
+    "status": {"enum": ["EXACT", "HIGH_CONFIDENCE", "AMBIGUOUS", "NO_MATCH"]},
+    "candidate_call_ids": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^pc_[a-f0-9]{64}$"}},
+    "provider_ids": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "time_delta_seconds": {"type": ["number", "null"], "minimum": 0},
+    "duration_delta_seconds": {"type": ["number", "null"], "minimum": 0},
+    "time_alignment": {"type": ["string", "null"]},
+    "evidence_source": {"const": "calllog_recording_reconciliation"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "last_evaluated_at": {"type": "string", "format": "date-time"}
+  }
+}

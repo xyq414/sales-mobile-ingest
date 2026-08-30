@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -7,6 +8,7 @@ import shutil
 import tempfile
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -23,9 +25,18 @@ from .calllog_export import (
     inspect_xml_schema,
     registered_calllog_export_providers,
     safe_rows_summary,
+    synctech_snapshot_metadata,
 )
 from .cloud_handoff import CloudHandoffPublisher, CloudPublishSummary
-from .config import ensure_layout, resolve_cloud_handoff_root, resolve_salesperson_identity
+from .call_fact_handoff import CallFactHandoffPublisher, CallFactPublishSummary
+from .config import (
+    ensure_layout,
+    backup_legacy_config_for_migration,
+    SalespersonIdentity,
+    resolve_calllog_freshness_seconds,
+    resolve_cloud_handoff_root,
+    resolve_salesperson_identity,
+)
 from .contract import build_metadata, iso_now, sha256_file, validate_recording
 from .events import (
     build_communication_event,
@@ -46,6 +57,14 @@ from .identity import (
     wpd_phone_candidate_details,
 )
 from .state import StateStore
+from .device_registry import DeviceRegistry
+from .phone_calls import (
+    build_call_recording_link,
+    build_phone_call,
+    phone_call_id,
+    validate_phone_call,
+    write_contract_atomically,
+)
 
 
 @dataclass
@@ -64,6 +83,9 @@ class IngestSummary:
     calllog_new_artifacts: int = 0
     calllog_canonical_rows_new: int = 0
     calllog_events_enriched: int = 0
+    phone_calls_created: int = 0
+    phone_calls_existing: int = 0
+    calllog_snapshot_status: str = "NOT_RUN"
     calllog_failures: int = 0
     cloud_packages_published: int = 0
     cloud_packages_already_published: int = 0
@@ -72,6 +94,11 @@ class IngestSummary:
     cloud_packages_blocked: int = 0
     cloud_packages_failures: int = 0
     cloud_handoff_status: str = "NOT_RUN"
+    call_fact_handoff_status: str = "NOT_RUN"
+    call_facts_published: int = 0
+    call_facts_already_published: int = 0
+    call_facts_updated: int = 0
+    call_fact_failures: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -89,6 +116,9 @@ class IngestSummary:
             "calllog_new_artifacts": self.calllog_new_artifacts,
             "calllog_canonical_rows_new": self.calllog_canonical_rows_new,
             "calllog_events_enriched": self.calllog_events_enriched,
+            "phone_calls_created": self.phone_calls_created,
+            "phone_calls_existing": self.phone_calls_existing,
+            "calllog_snapshot_status": self.calllog_snapshot_status,
             "calllog_failures": self.calllog_failures,
             "cloud_packages_published": self.cloud_packages_published,
             "cloud_packages_already_published": self.cloud_packages_already_published,
@@ -97,6 +127,11 @@ class IngestSummary:
             "cloud_packages_blocked": self.cloud_packages_blocked,
             "cloud_packages_failures": self.cloud_packages_failures,
             "cloud_handoff_status": self.cloud_handoff_status,
+            "call_fact_handoff_status": self.call_fact_handoff_status,
+            "call_facts_published": self.call_facts_published,
+            "call_facts_already_published": self.call_facts_already_published,
+            "call_facts_updated": self.call_facts_updated,
+            "call_fact_failures": self.call_fact_failures,
         }
 
 
@@ -119,8 +154,14 @@ class CallLogExportSummary:
     correlations_no_match: int = 0
     events_enriched: int = 0
     events_already_enriched: int = 0
+    snapshots_fresh: int = 0
+    snapshots_stale: int = 0
+    snapshots_unknown: int = 0
+    phone_calls_created: int = 0
+    phone_calls_existing: int = 0
+    snapshot_status: str = "MISSING"
 
-    def as_dict(self) -> dict[str, int]:
+    def as_dict(self) -> dict[str, Any]:
         return {
             "devices": self.devices,
             "directories_scanned": self.directories_scanned,
@@ -139,6 +180,12 @@ class CallLogExportSummary:
             "correlations_no_match": self.correlations_no_match,
             "events_enriched": self.events_enriched,
             "events_already_enriched": self.events_already_enriched,
+            "snapshots_fresh": self.snapshots_fresh,
+            "snapshots_stale": self.snapshots_stale,
+            "snapshots_unknown": self.snapshots_unknown,
+            "phone_calls_created": self.phone_calls_created,
+            "phone_calls_existing": self.phone_calls_existing,
+            "snapshot_status": self.snapshot_status,
         }
 
 
@@ -154,8 +201,11 @@ class Ingestor:
         self.paths = ensure_layout(data_root)
         self.bridge = bridge or MtpBridge()
         self.state = StateStore(self.paths["state"])
+        self.device_registry = DeviceRegistry(self.state.data)
         self.sidecar_writer = sidecar_writer or self._write_sidecar_atomically
         self.salesperson_identity = resolve_salesperson_identity()
+        self._bootstrap_registry_from_legacy_state()
+        self._maybe_migrate_legacy_identity()
 
     def probe(self) -> dict[str, Any]:
         raw = self.bridge.probe(self.state.known_dirs())
@@ -190,6 +240,19 @@ class Ingestor:
                 "candidates": candidate_rows,
             })
         return {"devices": result, "bridge_observation": raw.get("observation", "ok")}
+
+    def _observe_probe_devices(self, raw: dict[str, Any]) -> None:
+        for device in raw.get("devices", []):
+            alias = str(device.get("device_key") or "")
+            if not alias:
+                continue
+            vendor, model = device_identity(device.get("display_name"))
+            self.device_registry.observe(
+                observed_alias=alias,
+                display_name=str(device.get("display_name") or "") or None,
+                vendor=vendor,
+                model=model,
+            )
 
     def save_probe_report(self) -> Path:
         """Persist a diagnostic report with structural filename facts only."""
@@ -259,7 +322,7 @@ class Ingestor:
         """Copy only bounded public exporter XML files into ignored diagnostics and inspect their shape."""
         sources, devices, directory_count = self._discover_calllog_export_sources()
         summary = CallLogExportSummary(devices=devices, directories_scanned=directory_count, xml_candidates=len(sources))
-        for _, source in sources:
+        for provider, source in sources:
             try:
                 outcome, _, _, _ = self._stage_calllog_export(source)
                 if outcome == "new":
@@ -267,8 +330,11 @@ class Ingestor:
                 else:
                     summary.duplicate_artifacts += 1
                 summary.schema_valid += 1
-            except CallLogExportError:
+                summary.snapshot_status = "UNKNOWN"
+            except CallLogExportError as exc:
                 summary.schema_failures += 1
+                summary.snapshot_status = "MALFORMED"
+                self._remember_calllog_failure(provider, source, exc)
             except Exception:
                 summary.copy_failures += 1
         self.state.save()
@@ -286,18 +352,56 @@ class Ingestor:
                     summary.new_artifacts += 1
                 else:
                     summary.duplicate_artifacts += 1
+                imported_at = iso_now()
                 rows = provider.parse(artifact_path, artifact_sha256)
+                snapshot = synctech_snapshot_metadata(
+                    artifact_path,
+                    artifact_sha256=artifact_sha256,
+                    imported_at=imported_at,
+                    stale_after_seconds=resolve_calllog_freshness_seconds(),
+                    device_id=source["device_id"],
+                )
+                snapshot["device_id"] = source["device_id"]
+                if snapshot.get("root_count") is not None and snapshot["root_count"] != len(rows):
+                    snapshot["parse_status"] = "COUNT_MISMATCH"
+                    snapshot["freshness"] = "UNKNOWN"
+                existing_snapshot = self.state.data["calllog_snapshots"].get(snapshot["snapshot_id"])
+                if isinstance(existing_snapshot, dict):
+                    snapshot = existing_snapshot
+                self.state.remember_calllog_snapshot(snapshot)
+                freshness_field = {
+                    "FRESH": "snapshots_fresh", "STALE": "snapshots_stale", "UNKNOWN": "snapshots_unknown"
+                }[snapshot["freshness"]]
+                setattr(summary, freshness_field, getattr(summary, freshness_field) + 1)
+                if snapshot["freshness"] == "STALE" or summary.snapshot_status == "MISSING":
+                    summary.snapshot_status = snapshot["freshness"]
+                elif snapshot["freshness"] == "UNKNOWN" and summary.snapshot_status != "STALE":
+                    summary.snapshot_status = "UNKNOWN"
                 summary.schema_valid += 1
                 summary.parsed_rows += len(rows)
                 for row in rows:
-                    persisted = {**row, "device_key": source["device_key"]}
+                    persisted = {
+                        **row,
+                        "device_key": source["device_key"],
+                        "device_id": source["device_id"],
+                        "device_vendor": source.get("device_vendor"),
+                        "device_model": source.get("device_model"),
+                        "snapshot_id": snapshot["snapshot_id"],
+                    }
                     if self.state.remember_calllog_row(persisted):
                         summary.canonical_rows_new += 1
                     else:
                         summary.canonical_rows_duplicate += 1
+                    if self._publish_phone_call(persisted, snapshot, imported_at=imported_at):
+                        summary.phone_calls_created += 1
+                    else:
+                        summary.phone_calls_existing += 1
                 self._write_calllog_parse_summary(artifact_sha256, provider.provider_id, rows)
-            except CallLogExportError:
+            except CallLogExportError as exc:
                 summary.schema_failures += 1
+                if summary.parsed_rows == 0:
+                    summary.snapshot_status = "MALFORMED"
+                self._remember_calllog_failure(provider, source, exc)
             except Exception:
                 summary.copy_failures += 1
         correlation = self._reconcile_calllog_events()
@@ -325,6 +429,13 @@ class Ingestor:
                 device_key = str(device.get("device_key") or "")
                 if device_key:
                     device_keys.add(device_key)
+                vendor, model = device_identity(device.get("display_name"))
+                device_id = self.device_registry.observe(
+                    observed_alias=device_key,
+                    display_name=str(device.get("display_name") or "") or None,
+                    vendor=vendor,
+                    model=model,
+                )
                 for directory in device.get("directories", []):
                     directories += 1
                     for item in directory.get("files", []):
@@ -332,6 +443,9 @@ class Ingestor:
                             **item,
                             "device_key": device_key,
                             "device_name": str(device.get("display_name") or ""),
+                            "device_id": device_id,
+                            "device_vendor": vendor,
+                            "device_model": model,
                             "calllog_provider": provider.provider_id,
                         }))
         return sources, len(device_keys), directories
@@ -401,6 +515,52 @@ class Ingestor:
             "expected_size_bytes": source.get("size_bytes"),
         })
 
+    def _remember_calllog_failure(
+        self, provider: CallLogExportProvider, source: dict[str, Any], exc: Exception
+    ) -> None:
+        size = int(source.get("size_bytes") or 0)
+        artifact_sha256 = self.state.calllog_source_sha256(
+            self._calllog_source_key(source), size, source.get("modified_at")
+        )
+        failure_id = hashlib.sha256(
+            f"{provider.provider_id}|{source.get('device_id')}|{artifact_sha256 or self._calllog_source_key(source)}".encode("utf-8")
+        ).hexdigest()
+        evidence = {
+            "failure_evidence_version": "calllog-parse-failure/v1",
+            "provider_id": provider.provider_id,
+            "device_id": source.get("device_id"),
+            "artifact_sha256": artifact_sha256,
+            "parse_status": "MALFORMED",
+            "failed_at": iso_now(),
+            "reason": str(exc)[:300],
+        }
+        self._write_json_atomic(self.paths["calllog_failed"] / f"{failure_id}.failure.json", evidence)
+
+    def _publish_phone_call(self, row: dict[str, Any], snapshot: dict[str, Any], *, imported_at: str) -> bool:
+        device_id = str(row["device_id"])
+        call_id = phone_call_id(
+            provider_id=str(row["provider_id"]),
+            device_id=device_id,
+            source_row_id=str(row["canonical_call_id"]),
+        )
+        path = self.paths["calls"] / f"{call_id}.json"
+        existing = json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+        if existing:
+            validate_phone_call(existing)
+        attribution = self.device_registry.attribution(device_id=device_id, occurred_at=str(row["occurred_at"]))
+        call = build_phone_call(
+            row=row,
+            device_id=device_id,
+            snapshot=snapshot,
+            attribution=attribution,
+            existing=existing,
+            ingested_at=imported_at,
+        )
+        created = not path.exists()
+        write_contract_atomically(path, call, kind="phone_call")
+        self.state.remember_phone_call(call)
+        return created
+
     def _reconcile_calllog_events(self) -> dict[str, int]:
         result = {EXACT: 0, HIGH_CONFIDENCE: 0, AMBIGUOUS: 0, NO_MATCH: 0, "events_enriched": 0, "events_already_enriched": 0}
         safe_observations: list[dict[str, Any]] = []
@@ -416,25 +576,55 @@ class Ingestor:
                 continue
             recording = json.loads(recording_path.read_text(encoding="utf-8"))
             validate_recording(recording)
-            device_key = self._recording_device_key(recording, current_source_devices)
-            if not device_key:
-                continue
+            device_id = self._recording_device_id(recording, current_source_devices)
+            rows = self.state.calllog_rows_for_device_id(device_id) if device_id else []
             correlation = correlate_recording_to_calllog(
                 occurred_at=event.get("occurred_at"),
                 occurred_at_source=event.get("occurred_at_source"),
                 recording_duration_seconds=event.get("duration_seconds"),
-                rows=self.state.calllog_rows_for_device(device_key),
+                rows=rows,
             )
             result[correlation.status] += 1
             safe_observations.append({"event_id": event["event_id"], **correlation.safe_summary()})
             row = correlation.matched_row
+            candidate_call_ids = [
+                phone_call_id(
+                    provider_id=str(candidate["provider_id"]),
+                    device_id=str(candidate["device_id"]),
+                    source_row_id=str(candidate["canonical_call_id"]),
+                )
+                for candidate in correlation.candidate_rows
+            ]
+            matched_call_id = candidate_call_ids[0] if correlation.status in {EXACT, HIGH_CONFIDENCE} else None
+            link_id = "lnk_" + hashlib.sha256(
+                f"call-recording-link/v1|{recording['recording_id']}".encode("utf-8")
+            ).hexdigest()
+            link_path = self.paths["call_links"] / f"{link_id}.json"
+            existing_link = json.loads(link_path.read_text(encoding="utf-8")) if link_path.exists() else None
+            link = build_call_recording_link(
+                recording_id=str(recording["recording_id"]),
+                device_id=device_id,
+                status=correlation.status,
+                candidate_call_ids=candidate_call_ids,
+                provider_ids=[str(candidate["provider_id"]) for candidate in correlation.candidate_rows],
+                call_id=matched_call_id,
+                time_delta_seconds=correlation.time_delta_seconds,
+                duration_delta_seconds=correlation.duration_delta_seconds,
+                time_alignment=correlation.time_alignment,
+                existing=existing_link,
+            )
+            write_contract_atomically(link_path, link, kind="link")
+            self.state.remember_call_recording_link(link)
             if correlation.status not in {EXACT, HIGH_CONFIDENCE} or row is None:
                 continue
             canonical_call_id = str(row["canonical_call_id"])
             if self.state.calllog_enrichment_matches(event["event_id"], canonical_call_id):
                 result["events_already_enriched"] += 1
                 continue
-            updated_event = self._enriched_event(event, row)
+            attribution = self.device_registry.attribution(
+                device_id=str(row["device_id"]), occurred_at=str(row["occurred_at"])
+            )
+            updated_event = self._enriched_event(event, row, attribution=attribution)
             if updated_event != event:
                 media_path = self.paths["ready"] / str(recording["media_filename"])
                 replace_event_atomically(event_path_value, updated_event, media_path, recording_path)
@@ -448,7 +638,9 @@ class Ingestor:
         return result
 
     @staticmethod
-    def _enriched_event(event: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
+    def _enriched_event(
+        event: dict[str, Any], row: dict[str, Any], *, attribution: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         updated = dict(event)
         phone = row.get("phone_number_raw")
         if isinstance(phone, str) and phone:
@@ -464,33 +656,55 @@ class Ingestor:
         if direction in {"incoming", "outgoing"}:
             updated["call_direction"] = direction
             updated["call_direction_source"] = "calllog_export"
+        if attribution and attribution.get("salesperson_attribution_status") == "ASSIGNED":
+            updated["salesperson_id"] = attribution["salesperson_id"]
+            updated["salesperson_name"] = attribution["salesperson_name"]
+            updated["salesperson_identity_status"] = "CONFIGURED"
         validate_event(updated)
         return updated
 
     def _current_recording_source_devices(self) -> dict[str, str]:
-        """Read current recording candidates once to bind transient MTP device keys safely."""
+        """Resolve only exact current aliases to local enrollment identities."""
         try:
             raw = self.bridge.probe(self.state.known_dirs())
         except Exception:
             return {}
-        return {
-            str(item.get("relative_path")): str(device.get("device_key"))
-            for device in raw.get("devices", [])
-            for candidate in device.get("candidates", [])
-            for item in candidate.get("files", [])
-            if item.get("relative_path") and device.get("device_key")
-        }
+        result: dict[str, str] = {}
+        for device in raw.get("devices", []):
+            alias = str(device.get("device_key") or "")
+            if not alias:
+                continue
+            vendor, model = device_identity(device.get("display_name"))
+            device_id = self.device_registry.observe(
+                observed_alias=alias,
+                display_name=str(device.get("display_name") or "") or None,
+                vendor=vendor,
+                model=model,
+            )
+            for candidate in device.get("candidates", []):
+                for item in candidate.get("files", []):
+                    if item.get("relative_path"):
+                        result[str(item["relative_path"])] = device_id
+        return result
 
-    def _recording_device_key(self, recording: dict[str, Any], current_source_devices: dict[str, str]) -> str | None:
-        current_key = current_source_devices.get(str(recording.get("source_relative_path") or ""))
-        if current_key:
-            return current_key
-        matching_keys = [
+    def _recording_device_id(self, recording: dict[str, Any], current_source_devices: dict[str, str]) -> str | None:
+        persisted = self.state.recording_device(str(recording.get("recording_id") or ""))
+        if persisted:
+            return persisted
+        current = current_source_devices.get(str(recording.get("source_relative_path") or ""))
+        if current:
+            self.state.remember_recording_device(str(recording["recording_id"]), current)
+            return current
+        aliases = {
             key.split("|", 1)[0]
             for key, source in self.state.data["sources"].items()
             if source.get("sha256") == recording.get("sha256") and "|" in key
-        ]
-        return matching_keys[0] if len(set(matching_keys)) == 1 else None
+        }
+        if len(aliases) != 1:
+            return None
+        fingerprint = self.device_registry.alias_fingerprint(next(iter(aliases)))
+        indexed = self.device_registry.data["alias_index"].get(fingerprint)
+        return indexed if isinstance(indexed, str) else None
 
     def investigate_identity(self) -> dict[str, Any]:
         """Perform a bounded, read-only identity probe for one ready recording."""
@@ -630,11 +844,12 @@ class Ingestor:
             if candidate.get("recording_id") == recording.get("recording_id"):
                 validate_event(candidate)
                 return candidate_path, candidate
+        identity = self._recording_salesperson_identity(recording)
         event = build_communication_event(
             recording=recording,
             installation_id=self.state.installation_id(),
-            salesperson_id=self.salesperson_identity.salesperson_id if self.salesperson_identity else None,
-            salesperson_name=self.salesperson_identity.salesperson_name if self.salesperson_identity else None,
+            salesperson_id=identity.salesperson_id if identity else None,
+            salesperson_name=identity.salesperson_name if identity else None,
         )
         return event_path(self.paths["events"], event), event
 
@@ -655,11 +870,12 @@ class Ingestor:
         }
         validate_recording(updated_recording)
         self._write_sidecar_atomically(recording_path, updated_recording)
+        identity = self._recording_salesperson_identity(updated_recording)
         updated_event = build_communication_event(
             recording=updated_recording,
             installation_id=event["installation_id"],
-            salesperson_id=self.salesperson_identity.salesperson_id if self.salesperson_identity else None,
-            salesperson_name=self.salesperson_identity.salesperson_name if self.salesperson_identity else None,
+            salesperson_id=identity.salesperson_id if identity else None,
+            salesperson_name=identity.salesperson_name if identity else None,
         )
         media_path = self.paths["ready"] / str(updated_recording["media_filename"])
         if event_path_value.exists():
@@ -688,6 +904,8 @@ class Ingestor:
         stop_requested = False
         raw = self.bridge.probe(self.state.known_dirs())
         devices = raw.get("devices", [])
+        self._observe_probe_devices(raw)
+        self._maybe_migrate_legacy_identity()
         summary.devices = len(devices)
         self._refresh_legacy_duration_provenance(raw)
         for device in devices:
@@ -782,10 +1000,24 @@ class Ingestor:
             summary.calllog_new_artifacts += calllog_summary.new_artifacts
             summary.calllog_canonical_rows_new += calllog_summary.canonical_rows_new
             summary.calllog_events_enriched += calllog_summary.events_enriched
+            summary.phone_calls_created += calllog_summary.phone_calls_created
+            summary.phone_calls_existing += calllog_summary.phone_calls_existing
+            summary.calllog_snapshot_status = calllog_summary.snapshot_status
         except Exception as exc:
             # Call-log export is optional enrichment. It must not block a sound recording import.
             summary.calllog_failures += 1
             self._log("calllog_export_failure", {"reason": str(exc)[:300]})
+        try:
+            call_fact_summary = self.publish_call_facts()
+            summary.call_fact_handoff_status = call_fact_summary.status
+            summary.call_facts_published = call_fact_summary.published
+            summary.call_facts_already_published = call_fact_summary.already_published
+            summary.call_facts_updated = call_fact_summary.updated
+            summary.call_fact_failures = call_fact_summary.failures
+        except Exception as exc:
+            summary.call_fact_handoff_status = "CALL_FACT_HANDOFF_FAILURE"
+            summary.call_fact_failures += 1
+            self._log("call_fact_handoff_failure", {"reason": str(exc)[:300]})
         try:
             cloud_summary = self.publish_cloud_handoff()
             summary.cloud_handoff_status = cloud_summary.status
@@ -843,10 +1075,13 @@ class Ingestor:
         # the best reliable size observation and is carried into the contract/state.
         source = {**source, "size_bytes": actual_size}
         sha256 = sha256_file(staged_path)
+        device_id = self._observe_recording_source(source)
         source_key = self._source_key(source)
         if sha256 in self.state.data["imports"] or self._ready_pair_exists(sha256):
             staged_path.unlink(missing_ok=True)
             self.state.remember_source(source_key, actual_size, source.get("modified_at"), sha256)
+            if device_id:
+                self.state.remember_recording_device(f"rec_{sha256}", device_id)
             return "duplicate"
 
         timestamp, _ = self._recorded_timestamp(source)
@@ -875,6 +1110,9 @@ class Ingestor:
             raise
         self.state.remember_import(sha256, media_path.name)
         self.state.remember_source(source_key, actual_size, source.get("modified_at"), sha256)
+        if device_id:
+            self.state.remember_recording_device(str(metadata["recording_id"]), device_id)
+        self._maybe_migrate_legacy_identity()
         return "imported"
 
     def _refresh_legacy_duration_provenance(self, raw: dict[str, Any]) -> None:
@@ -915,28 +1153,33 @@ class Ingestor:
                 media_path = self.paths["ready"] / str(recording["media_filename"])
                 if not media_path.is_file() or sha256_file(media_path) != recording["sha256"]:
                     raise RuntimeError("recording media is absent or its sha256 differs")
+                identity = self._recording_salesperson_identity(recording)
                 event = build_communication_event(
                     recording=recording,
                     installation_id=installation_id,
-                    salesperson_id=self.salesperson_identity.salesperson_id if self.salesperson_identity else None,
-                    salesperson_name=self.salesperson_identity.salesperson_name if self.salesperson_identity else None,
+                    salesperson_id=identity.salesperson_id if identity else None,
+                    salesperson_name=identity.salesperson_name if identity else None,
                 )
                 validate_event(event)
                 output_path = event_path(self.paths["events"], event)
                 if output_path.exists():
                     existing = json.loads(output_path.read_text(encoding="utf-8"))
                     validate_event(existing)
-                    if self.salesperson_identity is not None and (
-                        existing.get("salesperson_id") != self.salesperson_identity.salesperson_id
-                        or existing.get("salesperson_name") != self.salesperson_identity.salesperson_name
-                        or existing.get("salesperson_identity_status") != "CONFIGURED"
+                    expected_id = identity.salesperson_id if identity else None
+                    expected_name = identity.salesperson_name if identity else None
+                    expected_status = "CONFIGURED" if identity else "UNCONFIGURED"
+                    has_registered_device = self.state.recording_device(str(recording["recording_id"])) is not None
+                    if has_registered_device and (
+                        existing.get("salesperson_id") != expected_id
+                        or existing.get("salesperson_name") != expected_name
+                        or existing.get("salesperson_identity_status") != expected_status
                     ):
-                        # Preserve any prior CallLog enrichment while adding only explicit business identity.
+                        # Preserve CallLog/media enrichment while synchronizing only explicit effective attribution.
                         enriched_identity = {
                             **existing,
-                            "salesperson_id": self.salesperson_identity.salesperson_id,
-                            "salesperson_name": self.salesperson_identity.salesperson_name,
-                            "salesperson_identity_status": "CONFIGURED",
+                            "salesperson_id": expected_id,
+                            "salesperson_name": expected_name,
+                            "salesperson_identity_status": expected_status,
                         }
                         validate_event(enriched_identity)
                         replace_event_atomically(output_path, enriched_identity, media_path, recording_path)
@@ -948,6 +1191,19 @@ class Ingestor:
                 result["failures"] += 1
                 self._log("event_failure", {"reason": str(exc)[:300]})
         return result
+
+    def _recording_salesperson_identity(self, recording: dict[str, Any]) -> SalespersonIdentity | None:
+        device_id = self.state.recording_device(str(recording.get("recording_id") or ""))
+        occurred_at = recording.get("recorded_at")
+        if not device_id or not isinstance(occurred_at, str):
+            return None
+        attribution = self.device_registry.attribution(device_id=device_id, occurred_at=occurred_at)
+        if attribution["salesperson_attribution_status"] != "ASSIGNED":
+            return None
+        return SalespersonIdentity(
+            salesperson_id=str(attribution["salesperson_id"]),
+            salesperson_name=str(attribution["salesperson_name"]),
+        )
 
     def publish_cloud_handoff(self) -> CloudPublishSummary:
         """Publish complete three-file packages without letting cloud delivery block phone ingest."""
@@ -964,6 +1220,180 @@ class Ingestor:
         self.state.save()
         self._log("cloud_handoff", summary.as_dict())
         return summary
+
+    def publish_call_facts(self) -> CallFactPublishSummary:
+        publisher = CallFactHandoffPublisher(
+            data_root=self.data_root,
+            ready_calls=self.paths["calls"],
+            ready_links=self.paths["call_links"],
+            state=self.state,
+            cloud_handoff_root=resolve_cloud_handoff_root(),
+        )
+        summary = publisher.publish()
+        self.state.save()
+        self._log("call_fact_handoff", summary.as_dict())
+        return summary
+
+    def list_devices(self, *, discover: bool = False) -> list[dict[str, Any]]:
+        if discover:
+            raw = self.bridge.probe(self.state.known_dirs())
+            self._observe_probe_devices(raw)
+            self._maybe_migrate_legacy_identity()
+            self.state.save()
+        return [
+            {
+                "device_id": device["device_id"],
+                "display_name": device.get("display_name"),
+                "vendor": device.get("vendor"),
+                "model": device.get("model"),
+                "enrollment_status": device.get("enrollment_status", "UNASSIGNED"),
+                "first_seen": device.get("first_seen"),
+                "last_seen": device.get("last_seen"),
+                "assignments": self.device_registry.assignments_for(device["device_id"]),
+            }
+            for device in self.device_registry.devices()
+        ]
+
+    def assign_device(
+        self,
+        *,
+        device_id: str,
+        salesperson_id: str,
+        salesperson_name: str,
+        effective_from: str,
+        effective_to: str | None = None,
+    ) -> dict[str, Any]:
+        assignment = self.device_registry.assign(
+            device_id=device_id,
+            salesperson_id=salesperson_id,
+            salesperson_name=salesperson_name,
+            effective_from=effective_from,
+            effective_to=effective_to,
+        )
+        self.refresh_phone_call_attribution(device_id=device_id)
+        self.state.save()
+        return assignment
+
+    def end_device_assignment(self, *, device_id: str, effective_to: str) -> dict[str, Any]:
+        assignment = self.device_registry.end_assignment(device_id=device_id, effective_to=effective_to)
+        self.refresh_phone_call_attribution(device_id=device_id)
+        self.state.save()
+        return assignment
+
+    def refresh_phone_call_attribution(self, *, device_id: str | None = None) -> int:
+        changed = 0
+        for path in self.paths["calls"].glob("*.json"):
+            call = json.loads(path.read_text(encoding="utf-8"))
+            validate_phone_call(call)
+            if device_id is not None and call["device_id"] != device_id:
+                continue
+            attribution = self.device_registry.attribution(
+                device_id=str(call["device_id"]), occurred_at=str(call["occurred_at"])
+            )
+            fields = (
+                "salesperson_id", "salesperson_name", "salesperson_assignment_id", "salesperson_attribution_status"
+            )
+            if all(call.get(field) == attribution[field] for field in fields):
+                continue
+            updated = {**call, **attribution, "last_enriched_at": iso_now()}
+            write_contract_atomically(path, updated, kind="phone_call")
+            self.state.remember_phone_call(updated)
+            changed += 1
+        return changed
+
+    def _observe_recording_source(self, source: dict[str, Any]) -> str | None:
+        alias = str(source.get("device_key") or "")
+        if not alias:
+            return None
+        return self.device_registry.observe(
+            observed_alias=alias,
+            display_name=str(source.get("device_name") or "") or None,
+            vendor=source.get("device_vendor"),
+            model=source.get("device_model"),
+        )
+
+    def _bootstrap_registry_from_legacy_state(self) -> None:
+        aliases: dict[str, str | None] = {}
+        for alias, item in self.state.data.get("devices", {}).items():
+            if isinstance(item, dict):
+                aliases[str(alias)] = item.get("display_name")
+        for row in self.state.data.get("calllog_exports", {}).get("rows", {}).values():
+            if isinstance(row, dict) and row.get("device_key"):
+                aliases.setdefault(str(row["device_key"]), None)
+        for alias in sorted(aliases):
+            vendor, model = device_identity(aliases[alias])
+            device_id = self.device_registry.observe(
+                observed_alias=alias,
+                display_name=aliases[alias],
+                vendor=vendor,
+                model=model,
+            )
+            for row in self.state.data.get("calllog_exports", {}).get("rows", {}).values():
+                if isinstance(row, dict) and row.get("device_key") == alias:
+                    row.setdefault("device_id", device_id)
+        for source_key, source in self.state.data.get("sources", {}).items():
+            if not isinstance(source, dict) or "|" not in source_key:
+                continue
+            alias = source_key.split("|", 1)[0]
+            fingerprint = self.device_registry.alias_fingerprint(alias)
+            indexed = self.device_registry.data["alias_index"].get(fingerprint)
+            sha256 = source.get("sha256")
+            if isinstance(indexed, str) and isinstance(sha256, str):
+                self.state.remember_recording_device(f"rec_{sha256}", indexed)
+
+    def _maybe_migrate_legacy_identity(self) -> None:
+        migration = self.device_registry.data["migration"]
+        if migration.get("status") == "MIGRATED":
+            return
+        if self.salesperson_identity is None:
+            return
+        # New installations must enroll explicitly. Automatic compatibility is limited to loaded v1 state.
+        if not self.state.data.get("state_migrations"):
+            return
+        devices = self.device_registry.devices()
+        if len(devices) != 1:
+            migration.update({
+                "status": "BLOCKED_AMBIGUOUS" if len(devices) > 1 else "PENDING_DEVICE_EVIDENCE",
+                "device_count": len(devices),
+                "evaluated_at": iso_now(),
+            })
+            return
+        device_id = devices[0]["device_id"]
+        candidate_times = [
+            str(row["occurred_at"])
+            for row in self.state.data.get("calllog_exports", {}).get("rows", {}).values()
+            if isinstance(row, dict) and row.get("device_id") == device_id and row.get("occurred_at")
+        ]
+        for recording_path in self.paths["ready"].glob("*.json"):
+            try:
+                recording = json.loads(recording_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if self.state.recording_device(str(recording.get("recording_id") or "")) == device_id and recording.get("recorded_at"):
+                candidate_times.append(str(recording["recorded_at"]))
+        if not candidate_times:
+            migration.update({"status": "PENDING_TIME_BOUNDARY", "device_count": 1, "evaluated_at": iso_now()})
+            return
+        effective_from = min(
+            candidate_times, key=lambda value: datetime.fromisoformat(value.replace("Z", "+00:00"))
+        )
+        assignment = self.device_registry.assign(
+            device_id=device_id,
+            salesperson_id=self.salesperson_identity.salesperson_id,
+            salesperson_name=self.salesperson_identity.salesperson_name,
+            effective_from=effective_from,
+            source="legacy_config_migration",
+        )
+        backup = backup_legacy_config_for_migration(self.paths["migration_evidence"])
+        migration.update({
+            "status": "MIGRATED",
+            "assignment_id": assignment["assignment_id"],
+            "device_id": device_id,
+            "effective_from": assignment["effective_from"],
+            "config_backup": backup.name if backup else None,
+            "evaluated_at": iso_now(),
+        })
+        self.refresh_phone_call_attribution(device_id=device_id)
 
     def _recorded_timestamp(self, source: dict[str, Any]) -> tuple[str, str]:
         from .contract import recorded_time_from_evidence

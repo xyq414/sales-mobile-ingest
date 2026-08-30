@@ -1,0 +1,54 @@
+{
+  "schema_version": "phone-call/v1",
+  "call_id": "pc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "device_id": "dev_00000000-0000-0000-0000-000000000001",
+  "device_vendor": "Synthetic",
+  "device_model": "Synthetic Android",
+  "source_provider": "synctech-sms-backup-restore/v1",
+  "source_row_id": "clg_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "source_artifact_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "source_artifact_sha256s": [
+    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  ],
+  "source_snapshot_id": "snp_dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "source_snapshot_ids": [
+    "snp_dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  ],
+  "snapshot": {
+    "backup_timestamp": null,
+    "imported_at": "2026-08-30T00:00:00+00:00",
+    "root_count": 1,
+    "backup_mode": "full",
+    "freshness": "UNKNOWN",
+    "parse_status": "PARSED",
+    "stale_after_seconds": 172800
+  },
+  "occurred_at": "2026-08-29T08:00:00+00:00",
+  "occurred_at_source": "calllog_export",
+  "occurred_at_confidence": "high",
+  "duration_seconds": 0,
+  "duration_source": "calllog_export",
+  "phone_number_raw": "15500001001",
+  "phone_number_normalized": "15500001001",
+  "phone_number_source": "calllog_export",
+  "contact_name": "Synthetic Contact",
+  "contact_name_source": "calllog_export",
+  "direction": "incoming",
+  "direction_source": "calllog_export",
+  "disposition": "missed",
+  "disposition_source": "calllog_export",
+  "raw_call_type": 3,
+  "subscription": {
+    "subscription_id": "10",
+    "component_name": "synthetic.subscription",
+    "slot_index": null,
+    "source": "calllog_export"
+  },
+  "salesperson_id": null,
+  "salesperson_name": null,
+  "salesperson_assignment_id": null,
+  "salesperson_attribution_status": "UNASSIGNED",
+  "created_at": "2026-08-30T00:00:00+00:00",
+  "ingested_at": "2026-08-30T00:00:00+00:00",
+  "last_enriched_at": "2026-08-30T00:00:00+00:00"
+}

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -55,11 +56,25 @@ def update_local_config(updates: dict[str, Any]) -> None:
             os.unlink(temporary_name)
 
 
+def backup_legacy_config_for_migration(destination_dir: Path) -> Path | None:
+    """Make one private, rollback-oriented backup without changing the legacy config."""
+    config_path = PROJECT_ROOT / "config.local.json"
+    if not config_path.is_file():
+        return None
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    destination = destination_dir / "config.local.legacy-salesperson.backup.json"
+    if not destination.exists():
+        shutil.copy2(config_path, destination)
+    return destination
+
+
 def resolve_data_root(cli_value: str | None = None) -> Path:
     """Return a user-configurable data root without encoding a drive letter."""
-    configured: str | None = cli_value or os.getenv("SALES_MOBILE_INGEST_DATA_ROOT")
+    configured: str | None = cli_value
     if not configured:
         configured = local_config().get("data_root")
+    if not configured:
+        configured = os.getenv("SALES_MOBILE_INGEST_DATA_ROOT")
     if not configured:
         configured = str(Path.home() / "Documents" / "SalesMobileIngestData")
     root = Path(os.path.expandvars(configured)).expanduser()
@@ -74,12 +89,15 @@ def ensure_layout(data_root: Path) -> dict[str, Path]:
         "stage": data_root / "inbox" / "recordings" / ".stage",
         "ready": data_root / "ready" / "recordings",
         "events": data_root / "ready" / "events",
+        "calls": data_root / "ready" / "calls",
+        "call_links": data_root / "ready" / "call-links",
         "failed": data_root / "failed" / "recordings",
         "state": data_root / "state",
         "logs": data_root / "logs",
         "calllog_diagnostics": data_root / "diagnostics" / "calllog-backup",
         "calllog_stage": data_root / "diagnostics" / "calllog-backup" / ".stage",
         "calllog_failed": data_root / "diagnostics" / "calllog-backup" / "failed",
+        "migration_evidence": data_root / "diagnostics" / "migrations",
     }
     for path in paths.values():
         path.mkdir(parents=True, exist_ok=True)
@@ -121,3 +139,10 @@ def resolve_cloud_handoff_root(cli_value: str | None = None) -> Path | None:
     if not root.is_absolute():
         root = (PROJECT_ROOT / root).resolve()
     return root
+
+
+def resolve_calllog_freshness_seconds() -> int:
+    value = local_config().get("calllog_freshness_seconds", 48 * 60 * 60)
+    if not isinstance(value, int) or isinstance(value, bool) or value < 60:
+        raise ConfigError("calllog_freshness_seconds must be an integer of at least 60")
+    return value
