@@ -25,7 +25,7 @@ function Get-PortableDevices([object]$Shell) {
     foreach ($item in @($thisPc.Items())) {
         $type = [string]$item.Type
         $name = [string]$item.Name
-        if ($type -match 'Portable|Mobile' -or $type.Contains($portableCn) -or $type.Contains($mobileCn) -or $name -match 'OPPO|Android') {
+        if ($type -match 'Portable|Mobile' -or $type.Contains($portableCn) -or $type.Contains($mobileCn) -or $name -match 'OPPO|Android|Xiaomi|Redmi|POCO') {
             if ($item.IsFolder) {
                 $result += $item
             }
@@ -126,14 +126,19 @@ function Get-DurationSeconds([object]$Item) {
     return $null
 }
 
-function Get-AudioFiles([object]$FolderItem, [string]$RelativePath, [int]$Depth = 0) {
+function Get-AudioFiles(
+    [object]$FolderItem,
+    [string]$RelativePath,
+    [int]$Depth = 0,
+    [int]$MaxDepth = 0
+) {
     $supported = @('.m4a', '.amr', '.mp3', '.wav', '.aac', '.ogg', '.flac', '.3gp', '.opus')
     $result = @()
     foreach ($child in @(Get-Children $FolderItem)) {
         $childRelative = Join-Relative $RelativePath ([string]$child.Name)
         if ($child.IsFolder) {
-            if ($Depth -lt 2) {
-                $result += @(Get-AudioFiles $child $childRelative ($Depth + 1))
+            if ($Depth -lt $MaxDepth) {
+                $result += @(Get-AudioFiles $child $childRelative ($Depth + 1) $MaxDepth)
             }
             continue
         }
@@ -150,22 +155,6 @@ function Get-AudioFiles([object]$FolderItem, [string]$RelativePath, [int]$Depth 
             }
         }
         if ($result.Count -ge 250) { break }
-    }
-    return $result
-}
-
-function Find-CandidateFolders([object]$FolderItem, [string]$RelativePath, [int]$Depth, [int]$MaxDepth) {
-    $result = @()
-    foreach ($child in @(Get-Children $FolderItem)) {
-        if (-not $child.IsFolder) { continue }
-        $childName = [string]$child.Name
-        $childRelative = Join-Relative $RelativePath $childName
-        if (Is-CandidateName $childName) {
-            $result += [pscustomobject]@{ item = $child; relative_path = $childRelative; from_cached_directory = $false }
-        }
-        if ($Depth -lt $MaxDepth -and $childName -notmatch '^(Android|data|obb)$') {
-            $result += @(Find-CandidateFolders $child $childRelative ($Depth + 1) $MaxDepth)
-        }
     }
     return $result
 }
@@ -232,30 +221,74 @@ function Resolve-RelativeItem([object]$Device, [string]$RelativePath) {
     return $current
 }
 
-function Get-CandidateRows([object]$Device, [object]$Payload) {
+function Resolve-FromKnownChildren([object[]]$Children, [string]$RelativePath) {
+    $parts = @($RelativePath -split '/' | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+    if ($parts.Count -eq 0) { return $null }
+    $available = @($Children)
+    $current = $null
+    for ($index = 0; $index -lt $parts.Count; $index++) {
+        $part = [string]$parts[$index]
+        $next = $null
+        foreach ($child in $available) {
+            if (([string]$child.Name).Equals($part, [System.StringComparison]::OrdinalIgnoreCase)) {
+                $next = $child
+                break
+            }
+        }
+        if ($null -eq $next) { return $null }
+        $current = $next
+        if ($index -lt ($parts.Count - 1)) {
+            if (-not $current.IsFolder) { return $null }
+            $available = @(Get-Children $current)
+        }
+    }
+    return $current
+}
+
+function Get-CandidateRows([object]$Device, [object]$Payload, [object[]]$StorageItems) {
     $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     $folders = @()
-    foreach ($cached in @($Payload.cached_dirs)) {
-        if ($null -eq $cached) { continue }
-        if ($cached.device_key -eq $Device.Path -or $cached.device_name -eq $Device.Name) {
-            $resolved = Resolve-RelativeItem $Device ([string]$cached.relative_path)
-            if ($null -ne $resolved -and $resolved.IsFolder -and $seen.Add([string]$cached.relative_path)) {
-                $folders += [pscustomobject]@{ item = $resolved; relative_path = [string]$cached.relative_path; from_cached_directory = $true }
+    foreach ($storage in @($StorageItems)) {
+        $storageName = [string]$storage.Name
+        $topLevel = @(Get-Children $storage)
+        foreach ($cached in @($Payload.cached_dirs)) {
+            if ($null -eq $cached) { continue }
+            if ($cached.device_key -ne $Device.Path -and $cached.device_name -ne $Device.Name) { continue }
+            $cachedPath = [string]$cached.relative_path
+            $prefix = "$storageName/"
+            if (-not $cachedPath.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+            $insideStorage = $cachedPath.Substring($prefix.Length)
+            $resolved = Resolve-FromKnownChildren $topLevel $insideStorage
+            if ($null -ne $resolved -and $resolved.IsFolder -and $seen.Add($cachedPath)) {
+                $folders += [pscustomobject]@{ item = $resolved; relative_path = $cachedPath; from_cached_directory = $true }
+            }
+        }
+        foreach ($child in $topLevel) {
+            if (-not $child.IsFolder) { continue }
+            $childName = [string]$child.Name
+            if (-not (Is-CandidateName $childName)) { continue }
+            $relativePath = Join-Relative $storageName $childName
+            if ($seen.Add($relativePath)) {
+                $folders += [pscustomobject]@{ item = $child; relative_path = $relativePath; from_cached_directory = $false }
+            }
+        }
+        foreach ($candidatePath in @($Payload.candidate_paths)) {
+            $pathHint = ([string]$candidatePath).Replace('\', '/').Trim('/')
+            if ([string]::IsNullOrWhiteSpace($pathHint)) { continue }
+            $resolved = Resolve-FromKnownChildren $topLevel $pathHint
+            $relativePath = Join-Relative $storageName $pathHint
+            if ($null -ne $resolved -and $resolved.IsFolder -and $seen.Add($relativePath)) {
+                $folders += [pscustomobject]@{ item = $resolved; relative_path = $relativePath; from_cached_directory = $false }
             }
         }
     }
-    foreach ($storage in @(Get-Children $Device)) {
-        if (-not $storage.IsFolder) { continue }
-        foreach ($found in @(Find-CandidateFolders $storage ([string]$storage.Name) 0 ([int]$Payload.search_depth))) {
-            if ($seen.Add([string]$found.relative_path)) { $folders += $found }
-        }
-    }
+    $audioSearchDepth = [Math]::Min([Math]::Max([int]$Payload.audio_search_depth, 0), 1)
     $rows = @()
     foreach ($found in $folders) {
         $rows += [pscustomobject]@{
             relative_path = $found.relative_path
             from_cached_directory = $found.from_cached_directory
-            files = @(Get-AudioFiles $found.item $found.relative_path)
+            files = @(Get-AudioFiles $found.item $found.relative_path 0 $audioSearchDepth)
         }
     }
     return $rows
@@ -372,19 +405,29 @@ function Invoke-Capabilities([object]$Shell) {
     return @{ ok = $true; inspection_scope = 'portable_device_roots_and_first_level_storage_objects'; devices = $devices }
 }
 
-function Invoke-Probe([object]$Shell, [object]$Payload) {
+function Invoke-ListDevices([object]$Shell) {
     $devices = @()
     foreach ($device in @(Get-PortableDevices $Shell)) {
-        $storageRoots = @()
-        foreach ($child in @(Get-Children $device)) {
-            if ($child.IsFolder) { $storageRoots += [string]$child.Name }
-        }
+        $storageItems = @(Get-Children $device | Where-Object { $_.IsFolder })
         $devices += [pscustomobject]@{
             device_key = [string]$device.Path
             display_name = [string]$device.Name
-            storage_roots = $storageRoots
-            search_depth = [int]$Payload.search_depth
-            candidates = @(Get-CandidateRows $device $Payload)
+            storage_roots = @($storageItems | ForEach-Object { [string]$_.Name })
+        }
+    }
+    return @{ ok = $true; observation = 'ok'; inspection_scope = 'portable_devices_and_storage_roots'; devices = $devices }
+}
+
+function Invoke-Probe([object]$Shell, [object]$Payload) {
+    $devices = @()
+    foreach ($device in @(Get-PortableDevices $Shell)) {
+        $storageItems = @(Get-Children $device | Where-Object { $_.IsFolder })
+        $devices += [pscustomobject]@{
+            device_key = [string]$device.Path
+            display_name = [string]$device.Name
+            storage_roots = @($storageItems | ForEach-Object { [string]$_.Name })
+            search_depth = 0
+            candidates = @(Get-CandidateRows $device $Payload $storageItems)
         }
     }
     return @{ ok = $true; observation = 'ok'; devices = $devices }
@@ -463,6 +506,10 @@ try {
     $shell = New-Object -ComObject Shell.Application
     if ($payload.operation -eq 'probe') {
         Emit-Json (Invoke-Probe $shell $payload)
+        exit 0
+    }
+    if ($payload.operation -eq 'list_devices') {
+        Emit-Json (Invoke-ListDevices $shell)
         exit 0
     }
     if ($payload.operation -eq 'copy') {

@@ -32,5 +32,5 @@ SMS/MMS/RCS 正文、微信/企业微信、ASR、LLM、CRM matching、Data Hub�
 
 - OPPO A6 Pro 5G 的既有 MTP/录音/SyncTech XML/旧 v1 handoff 证据仍为 `REAL_DEVICE_VERIFIED`。
 - 本轮 Call-first、多设备、双卡、迁移、late-arrival 与新 handoff 为 deterministic synthetic automated validation。
-- Desktop application logic、source GUI 与脱离 repository 的 packaged release smoke 为 synthetic/no-phone validation；真实 OPPO UI 一键导入尚未执行。
-- Redmi Note 12 5G / Redmi Note 15 仍为 `OFFICIAL_DOC_CANDIDATE` / `PHYSICAL_DEVICE_PENDING`，只有分别完成真实物理 Golden Case 才可升级。
+- Desktop application logic、source GUI 与脱离 repository 的 packaged release smoke 已通过；真实 OPPO packaged UI 首次绑定与一键数据链也已通过隐私最小化复核。
+- Redmi Note 15 已有只读 MTP device/storage root 和定点录音候选枚举的部分真机证据，但真实录音 copy/hash/dedupe 与 CallLog XML 链尚未执行；Redmi Note 12 5G 仍无独立实机证据。两者继续为 `OFFICIAL_DOC_CANDIDATE` / `PHYSICAL_DEVICE_PENDING`，只有分别完成真实物理 Golden Case 才可升级。

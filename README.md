@@ -24,6 +24,8 @@ Windows 本机以只读 USB/MTP 采集 Android CallLog 公共导出与可选电�
 
 桌面程序始终先保留 local canonical state，再写入已确认的坚果云同步目录。UI 只会声称“已写入坚果云同步目录”，不会把本机落盘冒充成远端同步成功。定时备份“已观察到后续更新”也只来自跨时间的公共 snapshot 证据；程序无法读取或认证 App 内部全部设置。
 
+首页连接检查只枚举 Windows 已公开的手机和存储根，并定点检查顶层 CallLog 导出目录；它不会为了一张状态卡递归遍历整部手机。录音目录会在真正点击导入后，按已登记厂商路径、顶层明确候选和既有成功缓存进行只读定点检查，因此首页不会被 Redmi/HyperOS 的慢速冷枚举拖到超时。
+
 发布、状态语义和首次使用说明见 [docs/Windows桌面Pilot.md](docs/Windows桌面Pilot.md)。2026-08-31 已通过 packaged UI 对真实 OPPO 完成首次绑定和一键导入；随后对本机 canonical state 与坚果云交付副本进行隐私最小化审计，schema、媒体哈希、state、PhoneCall/link 路由与归属边界均一致。首次向导历史归属选择的视觉反馈问题已在后续 release 修复，并加入 packaged 真实鼠标点击 smoke；修复后 UI 的下一次真机目视复核尚未执行。
 
 ## 开发者安装与 CLI
@@ -101,7 +103,7 @@ python -m venv .venv
 .\scripts\uninstall-autostart.ps1
 ```
 
-`probe` 只扫描限定深度内的候选目录名，然后只在候选目录中查看有限数量的音频项目。`Recordings` 之类的名称不是成功依据：OPPO v1 还要求音频和命名/时间特征；通用适配器还要求明确的 call/phone/通话特征，因此不会把普通 Music 目录当作通话录音。
+`probe` 不再递归遍历整部 shared storage；它只解析已经成功缓存的目录、存储根顶层的明确候选目录，以及适配矩阵中登记的厂商相对路径，然后在命中的候选目录中查看有限数量的直接音频项目。`Recordings` 之类的名称不是成功依据：OPPO v1 还要求音频和命名/时间特征；通用适配器还要求明确的 call/phone/通话特征，因此不会把普通 Music 目录当作通话录音。
 
 部分 Android/WPD 实现会把 Shell `Name` 作为不带扩展名的显示名。bridge 会优先读取 `System.FileName` 与 `System.FileExtension`，因此不会因该显示差异漏掉真实 `.mp3`、`.m4a` 等录音；路径解析仍使用 Shell 的原始相对节点名。
 
@@ -144,7 +146,7 @@ Call-first 语义见 [contract/Call-first接口说明.md](contract/Call-first接
 
 当前选择的下一条来源是用户主动在手机上使用 SyncTech `SMS Backup & Restore` 创建的 **CallLog-only 本地 XML 备份**，再经普通 USB/MTP 只读取得。它不是本项目的永久厂商依赖，也不需要 ADB、开发者模式或项目自带 Android App。
 
-OPPO A6 Pro 5G 已通过普通 MTP 真机验证既有 XML/录音闭环；当前真实关联仍是 `HIGH_CONFIDENCE`，不会伪称 `EXACT`。本轮新增 PhoneCall、双卡、多人多机、freshness 与 late-arrival 只完成 synthetic automated validation。Redmi Note 12 5G / Note 15 没有真机证据，保持 physical pending。设计与证据边界见 [docs/通话记录导出接口.md](docs/通话记录导出接口.md) 和 [docs/手机初始化与Redmi物理验收.md](docs/手机初始化与Redmi物理验收.md)。
+OPPO A6 Pro 5G 已通过普通 MTP 真机验证既有 XML/录音闭环；当前真实关联仍是 `HIGH_CONFIDENCE`，不会伪称 `EXACT`。本轮新增 PhoneCall、双卡、多人多机、freshness 与 late-arrival 主要由 synthetic automated validation 覆盖。Redmi Note 15 已有本机只读的设备/存储根与厂商定点录音候选枚举证据，但尚未执行真实录音 copy/hash/dedupe，且当前未发现顶层 `SMSBackupRestore/calls-*.xml`，所以整体继续保持 `PHYSICAL_DEVICE_PENDING`；Redmi Note 12 5G 仍无独立真机证据。设计与证据边界见 [docs/通话记录导出接口.md](docs/通话记录导出接口.md) 和 [docs/手机初始化与Redmi物理验收.md](docs/手机初始化与Redmi物理验收.md)。
 
 ## 历史 Android CallLog feasibility probe（非生产、非当前优先路径）
 

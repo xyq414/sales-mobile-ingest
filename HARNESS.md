@@ -32,7 +32,7 @@ Also covered: schema examples, state backup, atomic publication, source/artifact
 
 ## Desktop Pilot automated matrix
 
-Desktop tests inject a fake backend and separately exercise the real `Ingestor` preflight adapter. They cover no phone, unknown/known device, assignment boundaries, CallLog directory missing/no XML/FRESH/STALE/UNKNOWN/MALFORMED/count mismatch, scheduled evidence history, optional recording states, missing/invalid/confirmed cloud root, orchestration order, double-run exclusion, human error translation, privacy filtering, persistent config and packaged resource resolution。
+Desktop tests inject a fake backend and separately exercise the real `Ingestor` preflight adapter. They cover no phone, unknown/known device, assignment boundaries, CallLog directory missing/no XML/FRESH/STALE/UNKNOWN/MALFORMED/count mismatch, scheduled evidence history, optional/deferred recording states, missing/invalid/confirmed cloud root, orchestration order, double-run exclusion, human error translation, privacy filtering, persistent config and packaged resource resolution。Bridge regressions additionally assert that desktop device discovery uses the non-recursive `list_devices` operation, recording probe payloads use documented paths with depth zero, and timeout errors cannot expose encoded device/path payloads。
 
 `test_desktop_ui.py` creates a real Qt application with the offscreen Windows platform, renders the five home cards, drives button state, opens the first-run wizard/settings dialog, clicks both the historical-assignment indicator and its full-width row with real Qt mouse events, verifies the explicit selected state and application-service argument, captures a window image and closes cleanly. This is a GUI smoke, not just an import check。
 
@@ -41,5 +41,7 @@ Desktop tests inject a fake backend and separately exercise the real `Ingestor` 
 ## Physical acceptance
 
 `probe` remains read-only and must not assume a drive letter. A physical device passes only after real MTP discovery, source-byte invariance, copy/size/hash, duplicate ingest and its provider-specific checks complete. Absence of a connected phone is `NOT_RUN`, not automated failure. Redmi Note 12 5G and Redmi Note 15 use the separate runbook in `docs/手机初始化与Redmi物理验收.md`; synthetic fixtures can never set `REAL_DEVICE_VERIFIED`。
+
+The 2026-08-31 Redmi Note 15 partial run passed read-only MTP device/storage-root discovery and targeted recording-candidate/audio enumeration. The corrected desktop preflight completed in about two seconds instead of timing out. Recording copy/hash/dedupe was not run; no registered top-level `SMSBackupRestore/calls-*.xml` export was present; therefore the model remains `PHYSICAL_DEVICE_PENDING` rather than `REAL_DEVICE_VERIFIED`。
 
 The 2026-08-31 OPPO Pilot run started from the packaged `SalesMobileIngest.exe` and the one-click local/handoff data chain passed a privacy-minimal post-run audit. The checkbox choice was persisted correctly, but its visual feedback was unclear; the revised control has source and packaged real-click evidence, while its next physical visual recheck remains pending. A second consecutive UI import is still needed before claiming a separately observed no-growth physical replay。

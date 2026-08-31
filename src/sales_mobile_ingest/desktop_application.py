@@ -400,6 +400,12 @@ class ImportWorkflowService:
     def _recording_card(device: dict[str, Any] | None) -> StatusCard:
         if device is None:
             return StatusCard("recording", "通话录音", "等待手机连接", "录音是可选项，不影响通话记录导入。")
+        if device.get("recording_check_status") == "DEFERRED_TO_IMPORT":
+            return StatusCard(
+                "recording", "通话录音", "将在导入时定点检查",
+                "为避免慢速 MTP 全盘扫描，程序只在导入时读取厂商录音候选目录。",
+                "录音是可选项，不会阻止通话记录导入。", WARNING,
+            )
         if not device.get("recording_directory_found"):
             return StatusCard(
                 "recording", "通话录音", "未发现通话录音",
@@ -524,6 +530,7 @@ class ImportWorkflowService:
 _PHONE_LIKE = re.compile(r"(?<!\d)\+?\d(?:[\s().-]*\d){6,}(?!\d)")
 _WINDOWS_PATH = re.compile(r"(?i)(?:[a-z]:\\|\\\\)[^\r\n\"']+")
 _XML_CONTENT = re.compile(r"<[^>]+>")
+_ENCODED_ARGUMENT = re.compile(r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{80,}={0,2}(?![A-Za-z0-9+/])")
 
 
 def privacy_minimal_text(value: str) -> str:
@@ -531,4 +538,5 @@ def privacy_minimal_text(value: str) -> str:
     text = _PHONE_LIKE.sub("[号码已隐藏]", str(value))
     text = _WINDOWS_PATH.sub("[路径已隐藏]", text)
     text = _XML_CONTENT.sub("[XML内容已隐藏]", text)
+    text = _ENCODED_ARGUMENT.sub("[编码参数已隐藏]", text)
     return text[:1000]

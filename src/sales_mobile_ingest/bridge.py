@@ -22,12 +22,23 @@ class MtpBridge:
     def __init__(self, script_path: Path | None = None) -> None:
         self.script_path = script_path or BRIDGE_SCRIPT
 
-    def probe(self, cached_dirs: list[dict[str, str]] | None = None, search_depth: int = 3) -> dict[str, Any]:
+    def list_devices(self) -> dict[str, Any]:
+        """List portable devices and storage roots without scanning phone directories."""
+        response = self._run({"operation": "list_devices"}, timeout=90)
+        if not response.get("ok"):
+            raise BridgeError(response.get("error", "MTP device listing failed"))
+        return response
+
+    def probe(self, cached_dirs: list[dict[str, str]] | None = None, search_depth: int = 0) -> dict[str, Any]:
         return self._run({
             "operation": "probe",
             "cached_dirs": cached_dirs or [],
-            "search_depth": search_depth,
-        })
+            # Known vendor paths and direct top-level candidate names replace a
+            # cold recursive walk across the whole shared-storage tree.
+            "candidate_paths": _documented_candidate_paths(),
+            "search_depth": 0,
+            "audio_search_depth": 0,
+        }, timeout=150)
 
     def copy_to_staging(self, source: dict[str, Any], destination_dir: Path) -> Path:
         response = self._run({
@@ -64,7 +75,7 @@ class MtpBridge:
         *,
         directory_names: list[str],
         file_name_prefixes: list[str],
-        search_depth: int = 1,
+        search_depth: int = 0,
         maximum_files_per_directory: int = 25,
     ) -> dict[str, Any]:
         """Bounded read-only discovery of explicitly configured public XML export folders."""
@@ -76,9 +87,9 @@ class MtpBridge:
             "operation": "discover_calllog_exports",
             "directory_names": directory_names,
             "file_name_prefixes": file_name_prefixes,
-            "search_depth": min(max(search_depth, 0), 2),
+            "search_depth": 0,
             "maximum_files_per_directory": min(max(maximum_files_per_directory, 1), 100),
-        })
+        }, timeout=120)
         if not response.get("ok"):
             raise BridgeError(response.get("error", "MTP call-log export discovery failed"))
         return response
@@ -92,10 +103,13 @@ class MtpBridge:
             "-File", str(self.script_path), "-InputJsonBase64", encoded,
         ]
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        completed = subprocess.run(
-            command, text=True, encoding="utf-8", errors="replace", capture_output=True,
-            timeout=timeout, check=False, creationflags=creationflags,
-        )
+        try:
+            completed = subprocess.run(
+                command, text=True, encoding="utf-8", errors="replace", capture_output=True,
+                timeout=timeout, check=False, creationflags=creationflags,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise BridgeError(f"MTP bridge timed out after {timeout} seconds") from exc
         stdout = completed.stdout.strip()
         if completed.returncode != 0:
             message = completed.stderr.strip() or stdout or f"PowerShell bridge exit {completed.returncode}"
@@ -115,3 +129,19 @@ def _is_safe_mtp_segment(value: str) -> bool:
 
 def _is_safe_filename_prefix(value: str) -> bool:
     return isinstance(value, str) and value and "/" not in value and "\\" not in value and len(value) <= 120
+
+
+def _documented_candidate_paths() -> list[str]:
+    """Return case-insensitive unique path hints without binding the bridge to one phone vendor."""
+    from .adapters import adapter_profiles
+
+    result: list[str] = []
+    seen: set[str] = set()
+    for profile in adapter_profiles():
+        for candidate in profile.candidate_paths:
+            normalized = candidate.replace("\\", "/").strip("/")
+            key = normalized.casefold()
+            if normalized and key not in seen:
+                seen.add(key)
+                result.append(normalized)
+    return result

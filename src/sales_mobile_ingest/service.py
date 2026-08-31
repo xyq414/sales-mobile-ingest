@@ -247,7 +247,10 @@ class Ingestor:
 
     def discover_devices_for_desktop(self) -> list[dict[str, Any]]:
         """Observe connected devices and return only UI-safe facts plus an opaque local ID."""
-        raw = self.bridge.probe(self.state.known_dirs())
+        # Connection readiness must not wait for a recursive recording scan.
+        # Redmi/HyperOS can expose its storage promptly while cold directory
+        # enumeration takes tens of seconds per level.
+        raw = self.bridge.list_devices()
         devices: list[dict[str, Any]] = []
         for device in raw.get("devices", []):
             alias = str(device.get("device_key") or "")
@@ -262,17 +265,6 @@ class Ingestor:
                 model=model,
             )
             attribution = self.device_registry.attribution(device_id=device_id, occurred_at=iso_now())
-            accepted_directories = 0
-            recording_files = 0
-            for candidate in device.get("candidates", []):
-                decision = classify_candidate(
-                    device_name=display_name,
-                    relative_path=str(candidate.get("relative_path") or ""),
-                    files=candidate.get("files", []),
-                )
-                if decision.accepted:
-                    accepted_directories += 1
-                    recording_files += len(candidate.get("files", []))
             devices.append({
                 "device_id": device_id,
                 "display_name": display_name,
@@ -282,8 +274,9 @@ class Ingestor:
                 "salesperson_id": attribution.get("salesperson_id"),
                 "salesperson_name": attribution.get("salesperson_name"),
                 "assignment_status": attribution["salesperson_attribution_status"],
-                "recording_directory_found": accepted_directories > 0,
-                "recording_file_count": recording_files,
+                "recording_check_status": "DEFERRED_TO_IMPORT",
+                "recording_directory_found": None,
+                "recording_file_count": None,
             })
         self.state.save()
         return devices
@@ -605,7 +598,7 @@ class Ingestor:
             raw = self.bridge.discover_calllog_exports(
                 directory_names=list(provider.directory_names),
                 file_name_prefixes=list(provider.filename_prefixes),
-                search_depth=1,
+                search_depth=0,
             )
             for device in raw.get("devices", []):
                 device_key = str(device.get("device_key") or "")
@@ -1112,7 +1105,6 @@ class Ingestor:
         self._refresh_legacy_duration_provenance(raw)
         for device in devices:
             vendor, model = device_identity(device.get("display_name"))
-            accepted_any = False
             for candidate in device.get("candidates", []):
                 if stop_requested:
                     break
@@ -1124,7 +1116,6 @@ class Ingestor:
                 )
                 if not decision.accepted:
                     continue
-                accepted_any = True
                 summary.candidates_accepted += 1
                 candidate_succeeded = False
                 for item in candidate.get("files", []):
@@ -1154,41 +1145,6 @@ class Ingestor:
                     self.state.remember_directory(
                         str(device["device_key"]), str(device.get("display_name", "")), candidate["relative_path"]
                     )
-            if not stop_requested and not accepted_any and device.get("search_depth", 3) < 5:
-                # A directory-name-only expansion remains bounded and only happens after insufficient evidence.
-                expanded = self.bridge.probe(self.state.known_dirs(), search_depth=5)
-                expanded_device = next((row for row in expanded.get("devices", []) if row.get("device_key") == device.get("device_key")), None)
-                if expanded_device:
-                    for candidate in expanded_device.get("candidates", []):
-                        if candidate in device.get("candidates", []):
-                            continue
-                        summary.candidates_scanned += 1
-                        decision = classify_candidate(
-                            device_name=device.get("display_name"), relative_path=candidate["relative_path"], files=candidate.get("files", [])
-                        )
-                        if not decision.accepted:
-                            continue
-                        summary.candidates_accepted += 1
-                        candidate_succeeded = False
-                        for item in candidate.get("files", []):
-                            if limit is not None and summary.source_attempts >= limit:
-                                stop_requested = True
-                                break
-                            source = {**item, "device_key": device["device_key"], "device_name": device.get("display_name"), "device_vendor": vendor, "device_model": model, "adapter": decision.adapter, "duration_source": "wpd" if item.get("duration_seconds") is not None else "unknown"}
-                            summary.source_attempts += 1
-                            outcome = self._ingest_source(source)
-                            if outcome == "imported":
-                                summary.new_imports += 1
-                                candidate_succeeded = True
-                            elif outcome == "duplicate":
-                                summary.duplicates += 1
-                                candidate_succeeded = True
-                            else:
-                                summary.failures += 1
-                        if candidate_succeeded:
-                            self.state.remember_directory(
-                                str(device["device_key"]), str(device.get("display_name", "")), candidate["relative_path"]
-                            )
             if stop_requested:
                 break
         self.state.save()

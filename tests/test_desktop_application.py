@@ -241,6 +241,15 @@ def test_empty_recording_directory_is_not_an_error(tmp_path: Path) -> None:
     assert "不是错误" in status.card("recording").detail
 
 
+def test_deferred_recording_discovery_is_a_non_blocking_slow_mtp_warning(tmp_path: Path) -> None:
+    service, backend, _ = _service(tmp_path)
+    backend.devices = [{**_device(), "recording_check_status": "DEFERRED_TO_IMPORT"}]
+    status = service.preflight()
+    assert status.card("recording").severity == WARNING
+    assert status.card("recording").headline == "将在导入时定点检查"
+    assert status.can_import
+
+
 def test_missing_or_invalid_cloud_root_blocks_formal_import(tmp_path: Path) -> None:
     service, _, _ = _service(tmp_path, cloud=False)
     assert service.preflight().card("cloud").severity == BLOCKER
@@ -355,6 +364,13 @@ def test_privacy_filter_removes_number_path_and_xml() -> None:
     assert "13812345678" not in filtered
     assert "C:\\private" not in filtered
     assert "<call" not in filtered
+
+
+def test_privacy_filter_removes_long_encoded_command_arguments() -> None:
+    encoded = "eyJvcGVyYXRpb24iOiJwcm9iZSIsImNhY2hlZF9kaXJzIjpbXX0" * 3
+    filtered = privacy_minimal_text(f"-InputJsonBase64 {encoded}")
+    assert encoded not in filtered
+    assert "[编码参数已隐藏]" in filtered
 
 
 def test_packaged_resources_are_declared_from_one_resolver() -> None:

@@ -16,6 +16,8 @@ Legacy cloud v1: RecordingAsset + Event + audio -> immutable strict three-file p
 
 桌面 Pilot 是这条链路之上的薄入口：`PySide View → ImportWorkflowService → Ingestor/providers/publishers`。预检会安全复制并解析公共 CallLog snapshot 以形成就绪证据，但不会提前发布 PhoneCall；一键导入与 CLI 复用同一 `Ingestor.ingest_once` call-first orchestration。Qt worker 只负责把阻塞 MTP 工作移出 UI event loop，不包含第二套 parser、identity、dedupe 或 publisher。
 
+MTP 发现按用途分层：桌面连接预检使用 `list_devices`，只枚举便携设备与存储根；CallLog 预检只检查注册 provider 的顶层公共导出目录；录音 discovery 在导入时才运行，并只解析 cached directory、存储根顶层明确候选和 adapter 登记路径。首页不执行 shared-storage 递归扫描，避免把厂商 WPD/MTP 的冷枚举延迟变成“手机未连接”。
+
 ## Identity layers
 
 - `recording_id`: unchanged v1 media-content identity.

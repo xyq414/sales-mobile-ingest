@@ -1,6 +1,6 @@
 # 手机一次性初始化与 Redmi 物理验收
 
-状态：2026-08-31 runbook ready；Redmi Note 12 5G / Redmi Note 15 均 `PHYSICAL_DEVICE_PENDING`。本文是未来真机输入，不是已执行证据。
+状态：2026-08-31 runbook ready；Redmi Note 12 5G / Redmi Note 15 均 `PHYSICAL_DEVICE_PENDING`。Note 15 已有下述部分只读实机证据，其余清单仍是未来输入。
 
 ## 一次性手机初始化 contract
 
@@ -16,9 +16,9 @@
 8. 当前 Desktop Pilot 的正常日常路径应为：销售正常使用 → App scheduled export → 解锁手机 → USB 选择文件传输/MTP → 双击“销售手机导入” → 一键导入。V1 不后台常驻、不插线自动导入。项目不删除、移动、改名、回写手机文件。
 9. 新手机在桌面首次向导中填写销售编号/姓名，并明确“当前可见历史都属于该销售”或指定归属开始时间。底层仍保存 effective-dated assignment；不得编辑 config/state JSON，也不得按电脑当前用户猜销售。
 
-## OPPO Desktop Pilot 下一步物理验收
+## OPPO Desktop Pilot 后续物理验收
 
-既有 OPPO A6 Pro 5G backend/MTP/录音/SyncTech XML 证据保留为 `REAL_DEVICE_VERIFIED`，但 packaged UI 一键导入尚未执行。下一次只需从正式 release 做以下人工验收，不从源码命令开始：
+既有 OPPO A6 Pro 5G backend/MTP/录音/SyncTech XML 证据保留为 `REAL_DEVICE_VERIFIED`；2026-08-31 packaged UI 首次绑定、一键导入、local canonical 与本机坚果云 handoff 已 `PASS`。后续只需从正式 release 补做以下未单独记录的人工验收，不从源码命令开始：
 
 1. 解压并双击 `SalesMobileIngest.exe`；手机未连时首页应清楚显示 blocker，不崩溃。
 2. 解锁 OPPO、选择文件传输/MTP；确认首页只显示型号/销售业务信息，不显示 alias、serial、device ID 或号码。
@@ -50,6 +50,16 @@
 16. 记录 schedule 设置和 XML backup timestamp，等待至少一个真实 schedule interval；确认 artifact 实际更新并正确分类 freshness。手动 export 不能代替此项。
 17. 停止并重启 watcher，再运行一轮；PhoneCall、Recording、Link 与旧 event/package 均不重复。
 18. 结束后重新检查手机端源文件数量、大小/modified evidence；确认项目未删除、移动、改名或回写。
+
+## Redmi Note 15 当前部分实机证据
+
+- `PASS`：Windows Shell/MTP 识别 1 部设备及 1 个存储根；轻量设备入口约一秒内完成。
+- `PASS`：按 Xiaomi 登记路径进行只读定点录音发现，找到候选目录且其中存在音频项目；本轮只枚举，没有复制。
+- `PASS`：修复后的源码桌面完整预检约两秒完成，不再触发旧版 45 秒超时。
+- `MISSING`：当前顶层没有注册 SyncTech provider 所需的 `SMSBackupRestore/calls-*.xml`。已看到的其他 backups 目录不含匹配 XML，不能视为 CallLog ready。
+- `NOT_RUN`：真实录音 copy/size/hash/dedupe、CallLog XML parser、PhoneCall/link、一键 handoff、第二次 no-growth、schedule 更新和手机源文件不变复核。
+
+因此当前只证明连接与只读定点发现能力，不能升级整机适配状态。下一步应先在手机 `SMS Backup & Restore` 生成一次保存到公共存储顶层 `SMSBackupRestore` 的 Call logs 本地备份，再从 EXE 重新检查。
 
 ## 认证门槛
 

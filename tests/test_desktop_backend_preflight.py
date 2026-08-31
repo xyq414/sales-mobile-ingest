@@ -24,8 +24,20 @@ class PreflightBridge:
         self.directory = directory
         self.include_xml = include_xml
         self.modified_at = "2026-08-30T10:00:00+00:00"
+        self.probe_calls = 0
+
+    def list_devices(self) -> dict:
+        return {
+            "observation": "ok",
+            "devices": [{
+                "device_key": "synthetic-device-alias",
+                "display_name": "OPPO A6 Pro 5G",
+                "storage_roots": ["Internal shared storage"],
+            }],
+        }
 
     def probe(self, cached_dirs: object = None, search_depth: int = 3) -> dict:
+        self.probe_calls += 1
         return {
             "observation": "ok",
             "devices": [{
@@ -120,3 +132,13 @@ def test_desktop_device_assignment_persists_across_backend_restart(tmp_path: Pat
     observed = restarted.discover_devices_for_desktop()[0]
     assert observed["assignment_status"] == "ASSIGNED"
     assert observed["salesperson_id"] == "S001"
+    assert bridge.probe_calls == 0
+
+
+def test_desktop_device_discovery_defers_recording_scan_instead_of_running_full_probe(tmp_path: Path) -> None:
+    bridge = PreflightBridge(_xml(backup_ms=None))
+    ingestor = Ingestor(tmp_path / "data", bridge=bridge)
+    device = ingestor.discover_devices_for_desktop()[0]
+    assert bridge.probe_calls == 0
+    assert device["recording_check_status"] == "DEFERRED_TO_IMPORT"
+    assert device["recording_directory_found"] is None
