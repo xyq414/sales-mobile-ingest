@@ -1,5 +1,6 @@
 param(
     [string]$Python = "",
+    [string]$ReleaseName = "SalesMobileIngest-Pilot-win64",
     [switch]$SkipSmoke
 )
 
@@ -10,6 +11,9 @@ if ([string]::IsNullOrWhiteSpace($Python)) {
 }
 if (-not (Test-Path -LiteralPath $Python -PathType Leaf)) {
     throw "Build Python was not found. Prepare the repository development environment first."
+}
+if ($ReleaseName -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$') {
+    throw "ReleaseName must be a short filename-safe value without path separators."
 }
 
 function Assert-SafeChildPath([string]$Target, [string]$Parent) {
@@ -24,8 +28,8 @@ function Assert-SafeChildPath([string]$Target, [string]$Parent) {
 $distParent = Join-Path $projectRoot "dist"
 $distFolder = Join-Path $distParent "SalesMobileIngest"
 $releaseParent = Join-Path $projectRoot "release"
-$releaseFolder = Join-Path $releaseParent "SalesMobileIngest-Pilot-win64"
-$releaseZip = Join-Path $releaseParent "SalesMobileIngest-Pilot-win64.zip"
+$releaseFolder = Join-Path $releaseParent $ReleaseName
+$releaseZip = Join-Path $releaseParent ($ReleaseName + ".zip")
 New-Item -ItemType Directory -Path $distParent -Force | Out-Null
 New-Item -ItemType Directory -Path $releaseParent -Force | Out-Null
 
@@ -51,7 +55,7 @@ Compress-Archive -LiteralPath $releaseFolder -DestinationPath $releaseZip -Compr
 if (-not $SkipSmoke) {
     $smokeRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("sales-mobile-ingest-release-smoke-" + [guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Path $smokeRoot | Out-Null
-    $cleanRelease = Join-Path $smokeRoot "SalesMobileIngest-Pilot-win64"
+    $cleanRelease = Join-Path $smokeRoot $ReleaseName
     Copy-Item -LiteralPath $releaseFolder -Destination $cleanRelease -Recurse
     $smokeState = Join-Path $smokeRoot "state"
     New-Item -ItemType Directory -Path $smokeState | Out-Null

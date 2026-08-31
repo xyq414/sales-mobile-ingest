@@ -24,7 +24,7 @@ Windows 本机以只读 USB/MTP 采集 Android CallLog 公共导出与可选电�
 
 桌面程序始终先保留 local canonical state，再写入已确认的坚果云同步目录。UI 只会声称“已写入坚果云同步目录”，不会把本机落盘冒充成远端同步成功。定时备份“已观察到后续更新”也只来自跨时间的公共 snapshot 证据；程序无法读取或认证 App 内部全部设置。
 
-发布、状态语义和首次使用说明见 [docs/Windows桌面Pilot.md](docs/Windows桌面Pilot.md)。当前 packaged UI 已完成 synthetic/no-phone smoke；尚未用本 UI 对真实 OPPO 执行一键导入，因此物理 UI 验收仍为 `NOT_RUN`。
+发布、状态语义和首次使用说明见 [docs/Windows桌面Pilot.md](docs/Windows桌面Pilot.md)。2026-08-31 已通过 packaged UI 对真实 OPPO 完成首次绑定和一键导入；随后对本机 canonical state 与坚果云交付副本进行隐私最小化审计，schema、媒体哈希、state、PhoneCall/link 路由与归属边界均一致。首次向导历史归属选择的视觉反馈问题已在后续 release 修复，并加入 packaged 真实鼠标点击 smoke；修复后 UI 的下一次真机目视复核尚未执行。
 
 ## 开发者安装与 CLI
 

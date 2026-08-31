@@ -36,6 +36,6 @@
 - `release/SalesMobileIngest-Pilot-win64/`：可直接双击目录；
 - `release/SalesMobileIngest-Pilot-win64.zip`：交付 ZIP。
 
-脚本从 `SalesMobileIngest.spec` bundling `scripts/mtp_bridge.ps1` 与 contract schemas，随后把 release 复制到 repository 外的干净临时目录，直接运行 windowed EXE 两次。Smoke 必须验证 no-phone preflight、主窗口/5 卡/向导/设置、资源 lookup、用户可写配置跨启动持久化和 clean close。所有 build/dist/release 输出均 gitignored。
+脚本从 `SalesMobileIngest.spec` bundling `scripts/mtp_bridge.ps1` 与 contract schemas，随后把 release 复制到 repository 外的干净临时目录，直接运行 windowed EXE 两次。Smoke 必须验证 no-phone preflight、主窗口/5 卡/向导/设置、历史归属卡的真实鼠标点击及明确选中反馈、资源 lookup、用户可写配置跨启动持久化和 clean close。旧版程序仍在运行、默认目录无法替换时，可用 `-ReleaseName` 生成并验证一个独立的文件名安全版本目录；脚本不会强制终止用户正在运行的程序。所有 build/dist/release 输出均 gitignored。
 
-当前证据：source GUI smoke `PASS`；packaged clean-directory double-launch smoke `PASS`；真实 OPPO UI one-click acceptance `NOT_RUN`。Redmi 状态仍按厂商 runbook 保持 `PHYSICAL_DEVICE_PENDING`。
+当前证据：source GUI smoke `PASS`；packaged clean-directory double-launch + 历史归属真实点击 smoke `PASS`；2026-08-31 真实 OPPO packaged UI 首次绑定与一键导入链路 `PASS`。本机隐私最小化复核证明 local contracts、媒体哈希、state 计数、归属边界和坚果云 call-fact/link 路由一致；未匹配录音仍保持 `NO_MATCH`，没有硬绑。该次使用暴露的历史归属控件视觉反馈不足已在后续 release 修复，修复后真机目视复核仍为 `NOT_RUN`。Redmi 状态继续保持 `PHYSICAL_DEVICE_PENDING`。

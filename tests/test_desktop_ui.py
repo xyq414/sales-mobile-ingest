@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QStyle, QStyleOptionButton
 
 from sales_mobile_ingest.desktop_application import (
     BLOCKER,
@@ -19,9 +22,14 @@ from sales_mobile_ingest.desktop_ui import FirstRunWizard, MainWindow, SettingsD
 class StaticService:
     def __init__(self, status: PreflightStatus) -> None:
         self.status = status
+        self.assignments: list[dict[str, object]] = []
 
     def preflight(self) -> PreflightStatus:
         return self.status
+
+    def assign_salesperson(self, **kwargs: object) -> dict[str, object]:
+        self.assignments.append(kwargs)
+        return kwargs
 
 
 def _status(*, ready: bool, first_run: bool = False, data_root: Path | None = None) -> PreflightStatus:
@@ -85,4 +93,39 @@ def test_first_run_and_settings_dialogs_open_without_internal_ids(tmp_path: Path
     settings.close()
     wizard.close()
     window.close()
+    app.processEvents()
+
+
+def test_historical_assignment_choice_has_clear_real_click_feedback_and_reaches_service(tmp_path: Path) -> None:
+    app = create_application()
+    status = _status(ready=False, first_run=True, data_root=tmp_path)
+    status = replace(status, cloud_root=tmp_path / "cloud")
+    service = StaticService(status)
+    wizard = FirstRunWizard(status, service)  # type: ignore[arg-type]
+    wizard.show()
+    wizard.setCurrentId(wizard.assignment_page_id)
+    app.processEvents()
+
+    option = QStyleOptionButton()
+    wizard.historical_all.initStyleOption(option)
+    indicator = wizard.historical_all.style().subElementRect(
+        QStyle.SubElement.SE_CheckBoxIndicator, option, wizard.historical_all
+    )
+    QTest.mouseClick(wizard.historical_all, Qt.MouseButton.LeftButton, pos=indicator.center())
+    app.processEvents()
+    assert wizard.historical_all.isChecked()
+    assert not wizard.effective_from.isEnabled()
+    assert wizard.historical_choice_state.text().startswith("已选择")
+
+    QTest.mouseClick(wizard.historical_all, Qt.MouseButton.LeftButton, pos=wizard.historical_all.rect().center())
+    QTest.mouseClick(wizard.historical_all, Qt.MouseButton.LeftButton, pos=wizard.historical_all.rect().center())
+    assert wizard.historical_all.isChecked()
+
+    wizard.salesperson_id.setText("S001")
+    wizard.salesperson_name.setText("张三")
+    wizard.accept()
+    assert service.assignments
+    assert service.assignments[-1]["historical_all_belongs"] is True
+    assert service.assignments[-1]["effective_from"] is not None
+    wizard.close()
     app.processEvents()

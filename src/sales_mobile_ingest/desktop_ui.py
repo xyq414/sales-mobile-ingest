@@ -420,16 +420,37 @@ class FirstRunWizard(QWizard):
         self.salesperson_name = QLineEdit()
         self.salesperson_name.setPlaceholderText("例如：张三")
         self.historical_all = QCheckBox("这部手机当前可见的历史通话都属于该销售")
+        self.historical_all.setObjectName("historicalAssignmentChoice")
+        self.historical_all.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.historical_all.setMinimumHeight(58)
+        self.historical_all.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.historical_all.setToolTip("点击整行即可选择或取消")
+        self.historical_all.setStyleSheet(
+            "QCheckBox#historicalAssignmentChoice {"
+            "  background:#FFFFFF; border:2px solid #98A2B3; border-radius:10px;"
+            "  padding:12px 14px; color:#344054; font-size:14px; font-weight:600;"
+            "}"
+            "QCheckBox#historicalAssignmentChoice:hover { background:#F8FAFC; border-color:#667085; }"
+            "QCheckBox#historicalAssignmentChoice:checked {"
+            "  background:#EAF2FF; border-color:#175CD3; color:#1849A9;"
+            "}"
+            "QCheckBox#historicalAssignmentChoice::indicator { width:22px; height:22px; }"
+        )
+        self.historical_choice_state = QLabel()
+        self.historical_choice_state.setObjectName("historicalAssignmentState")
+        self.historical_choice_state.setWordWrap(True)
         self.effective_from = QDateTimeEdit()
         self.effective_from.setCalendarPopup(True)
         self.effective_from.setDisplayFormat("yyyy-MM-dd HH:mm")
         self.effective_from.setDateTime(datetime.now())
-        self.historical_all.toggled.connect(lambda checked: self.effective_from.setEnabled(not checked))
+        self.historical_all.toggled.connect(self._apply_historical_choice)
         form.addRow("销售编号", self.salesperson_id)
         form.addRow("销售姓名", self.salesperson_name)
         form.addRow("", self.historical_all)
+        form.addRow("", self.historical_choice_state)
         form.addRow("归属开始时间", self.effective_from)
-        self.addPage(assignment_page)
+        self.assignment_page_id = self.addPage(assignment_page)
+        self._apply_historical_choice(False)
 
         calllog_page = QWizardPage()
         calllog_page.setTitle("准备通话记录")
@@ -474,6 +495,16 @@ class FirstRunWizard(QWizard):
         finish_layout.addStretch(1)
         self.addPage(finish_page)
         self.update_preflight(self.status)
+
+    @Slot(bool)
+    def _apply_historical_choice(self, checked: bool) -> None:
+        self.effective_from.setEnabled(not checked)
+        if checked:
+            self.historical_choice_state.setText("已选择：将以当前可见的最早通话作为归属起点。")
+            self.historical_choice_state.setStyleSheet("color:#175CD3; font-weight:600;")
+        else:
+            self.historical_choice_state.setText("未选择：请在下方指定归属开始时间。")
+            self.historical_choice_state.setStyleSheet("color:#667085;")
 
     def update_preflight(self, status: PreflightStatus) -> None:
         self.status = status

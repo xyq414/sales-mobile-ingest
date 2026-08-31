@@ -45,6 +45,9 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _run_smoke(report_path: Path, screenshot_path: Path | None) -> int:
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
     from sales_mobile_ingest.desktop_ui import FirstRunWizard, MainWindow, SettingsDialog, create_application
 
     config = local_config()
@@ -60,7 +63,22 @@ def _run_smoke(report_path: Path, screenshot_path: Path | None) -> int:
 
     wizard = FirstRunWizard(status, service, window)
     wizard.show()
+    wizard.setCurrentId(wizard.assignment_page_id)
     application.processEvents()
+    historical_before = wizard.historical_all.isChecked()
+    QTest.mouseClick(
+        wizard.historical_all,
+        Qt.MouseButton.LeftButton,
+        pos=wizard.historical_all.rect().center(),
+    )
+    application.processEvents()
+    historical_after = wizard.historical_all.isChecked()
+    historical_click_passed = (
+        not historical_before
+        and historical_after
+        and not wizard.effective_from.isEnabled()
+        and wizard.historical_choice_state.text().startswith("已选择")
+    )
     wizard.close()
     settings = SettingsDialog(status, service, window)
     settings.show()
@@ -81,7 +99,7 @@ def _run_smoke(report_path: Path, screenshot_path: Path | None) -> int:
         "call_recording_link_schema": resource_path("contract", "call_recording_link.schema.json"),
     }
     report = {
-        "status": "PASS" if all(path.is_file() for path in resources.values()) else "FAIL",
+        "status": "PASS" if all(path.is_file() for path in resources.values()) and historical_click_passed else "FAIL",
         "resources": {key: path.is_file() for key, path in resources.items()},
         "config_path": str(active_config_path()),
         "default_desktop_config_path": str(desktop_config_path()),
@@ -91,6 +109,7 @@ def _run_smoke(report_path: Path, screenshot_path: Path | None) -> int:
         "main_window_rendered": True,
         "home_cards_rendered": len(window.card_widgets) == 5,
         "first_run_wizard_opened": True,
+        "historical_assignment_real_click": historical_click_passed,
         "settings_opened": True,
         "window_closed_cleanly": not window.isVisible(),
         "screenshot_saved": screenshot_saved if screenshot_path else None,
